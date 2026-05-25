@@ -1,6 +1,6 @@
 {
   "name": "elitea-skills",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Claude-Code-native ELITEA platform toolkit — 2 agents (elitea-builder, elitea-integrator) and 4 skills (elitea-platform, elitea-pipeline, elitea-toolkit, elitea-testing) for building, deploying, testing, and integrating ELITEA artifacts.",
   "author": {
     "name": "Alexander Bychinskiy",

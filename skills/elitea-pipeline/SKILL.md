@@ -7,6 +7,8 @@ description: Author, debug, and deploy ELITEA pipelines (YAML-defined multi-step
 
 A pipeline is an `agent_type: pipeline` ELITEA agent whose `instructions` field is YAML describing a node graph. This skill covers the YAML schema, the modern node types, common shapes, and the runtime helpers you have inside `code` nodes.
 
+> **Growing this skill:** if a session uncovers a new node-type quirk, state pattern, or pipeline gotcha, append it to `references/{yaml-schema,patterns,workflows}.md` or add a clean working pipeline to `examples/`. See `elitea-platform/references/growing-this-toolkit.md` for the full routing decision tree and "what NOT to promote" guidance.
+
 ## Quick lookup
 
 | If you need... | Load |

@@ -65,7 +65,7 @@ Token-name aliases (all the same value):
 
 ## Key facts (don't re-derive)
 
-- **Base URLs:** production `https://nexus.elitea.ai/`, pre-prod `https://next.elitea.ai/`
+- **Base URL:** `https://next.elitea.ai/` (sole environment — `nexus.elitea.ai` has been retired)
 - **API versions:** v2 canonical (`/api/v2/elitea_core/...`); v1 still hosts configurations, artifacts, secrets
 - **Most paths embed `prompt_lib/{project_id}`** as the mode + project segment
 - **First agent version MUST be `"base"`**; subsequent versions MUST NOT be `"base"`

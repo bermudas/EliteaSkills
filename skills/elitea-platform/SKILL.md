@@ -20,7 +20,7 @@ The ELITEA platform exposes everything via a REST API and (separately) via an MC
 
 ## Always-true facts (no need to load anything)
 
-- **Base URLs:** production `https://nexus.elitea.ai/`, pre-prod `https://next.elitea.ai/`
+- **Base URL:** `https://next.elitea.ai/` (the only ELITEA environment — the older `nexus.elitea.ai` host has been retired)
 - **Auth header:** `Authorization: Bearer <PAT>` on every request
 - **API versions:** v2 is canonical (`/api/v2/elitea_core/...`); v1 still hosts configurations, artifacts, secrets, and a fallback for legacy paths
 - **`mode` segment:** `prompt_lib` for ~95% of endpoints; `default` for MCP proxies / secrets / artifacts; `administration` for admin-only
@@ -75,3 +75,13 @@ If these URLs return 404, the docs site moved — fall back to `references/api-r
 - Never hardcode a PAT in code — read from env / vault / `alita_client.unsecret()`
 - Never invent endpoint paths — load `references/api-reference.md` and copy exactly
 - Always use HTTPS; the platform redirects HTTP and the redirect drops Authorization
+
+## Growing this toolkit
+
+When you finish a real task and notice the skill didn't know something, route the learning back: scripts → `scripts/`, gotchas → `references/conventions.md`, response-shape facts → `references/api-reference.md`. Full decision tree, generalization checklist, and "what NOT to promote" rules in **`references/growing-this-toolkit.md`** — load it before adding a new file or section so you put the knowledge in the place future sessions will actually find it.
+
+## Bundled scripts
+
+- `scripts/list_models.py` — print the LLM models available to a project. Run this BEFORE writing any `llm_settings.model_name`; the api-reference shortnames are illustrative and wrong names silently fall back to the project default.
+- `scripts/build_agent_payload.py` — compose a complete `POST /applications/...` payload by pulling live toolkit settings from the project. Handles the `type`+`settings`+`selected_tools` shape that the create endpoint actually requires.
+- `scripts/update_version_field.py` — GET an agent version, mutate a small set of fields (dotted-path syntax), PUT it back. Preserves tools and `author_id`. Dry-run by default; `--apply` to commit.

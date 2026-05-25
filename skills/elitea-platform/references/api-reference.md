@@ -139,11 +139,12 @@ The list of fields that get secret-vaulted (from `SENSITIVE_TOOLKIT_SETTINGS`):
 | 422 | Publish validation `FAIL` state |
 | 500 | Internal error (publish, fork wrap) |
 
-### 0.6 Common base URLs
+### 0.6 Base URL
 
-- Production: `https://nexus.elitea.ai/`
-- Pre-prod / "next": `https://next.elitea.ai/`
+- ELITEA (sole environment): `https://next.elitea.ai/`
 - API root: prepend the base + `/api/v1/` or `/api/v2/` per the table in §0.1.
+
+> The older `https://nexus.elitea.ai/` host has been retired. Treat any reference to it as outdated and update to `next.elitea.ai`.
 
 ---
 
@@ -320,7 +321,7 @@ The list of fields that get secret-vaulted (from `SENSITIVE_TOOLKIT_SETTINGS`):
   "id": 456,
   "projectId": 123,
   "owner_id": 789,
-  "webhook_secret": "wh_secret_abc123xyz",
+  "webhook_secret": "<webhook-secret-placeholder>",
   "version": {
     "name": "v2.1",
     "tags": ["support", "customer-service", "multilingual"],
@@ -751,7 +752,7 @@ Pipelines use the **same update endpoints and payload structures as agents**:
   "id": 678,
   "projectId": 123,
   "owner_id": 789,
-  "webhook_secret": "wh_pipeline_xyz789",
+  "webhook_secret": "<webhook-secret-placeholder>",
   "version": {
     "name": "v2.0",
     "tags": ["content", "automation", "multi-channel"],
@@ -1433,7 +1434,7 @@ Pipelines use the **same update endpoints and payload structures as agents**:
     "data": {
       "api_key": "<YOUR_STRIPE_API_KEY>",
       "api_base": "https://api.stripe.com/v1",
-      "webhook_secret": "whsec_abc123def456ghi789jkl012mno345"
+      "webhook_secret": "<your-webhook-secret-here>"
     },
     "shared": false
   }

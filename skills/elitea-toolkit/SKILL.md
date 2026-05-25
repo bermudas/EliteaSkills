@@ -7,6 +7,8 @@ description: Create, configure, and link ELITEA toolkits — OpenAPI/REST toolki
 
 A toolkit is an ELITEA wrapper around an external capability (REST API, MCP server, datasource, python code, or another ELITEA agent). Once created, toolkits are linked to agent versions with optional `selected_tools` filtering.
 
+> **Growing this skill:** when a session reveals a new toolkit-type pattern, OpenAPI extension, or credential-shape gotcha, append it to `references/{toolkit-types,openapi-toolkits}.md` or add a reusable spec to `examples/`. See `elitea-platform/references/growing-this-toolkit.md` for the full routing decision tree.
+
 ## Quick lookup
 
 | If you need... | Load |

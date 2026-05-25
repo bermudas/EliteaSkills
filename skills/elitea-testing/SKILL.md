@@ -5,6 +5,8 @@ description: Test, run, debug, and schedule ELITEA agents and pipelines. Covers 
 
 # ELITEA Testing — Run, Debug, Schedule
 
+> **Growing this skill:** new failure-mode patterns, scheduling tricks, idempotency rules, or smoke-test scripts should land in `references/test-patterns.md` or `scripts/`. Multi-step debugging case studies go in `references/<artifact-name>-case-study.md`. See `elitea-platform/references/growing-this-toolkit.md` for the routing decision tree and the script-generalization checklist.
+
 ELITEA artifacts (agents, pipelines, toolkits) are tested by **calling the same REST API users hit at runtime**. There is no separate test harness — production endpoints serve test traffic, and you observe outcomes via the conversation/message endpoints.
 
 ## Quick lookup

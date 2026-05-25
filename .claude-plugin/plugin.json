@@ -1,6 +1,6 @@
 {
   "name": "elitea-skills",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Claude-Code-native knowledge base for the ELITEA platform (next.elitea.ai). Includes 2 role-based agents (elitea-builder, elitea-integrator) and 4 progressive-disclosure skills (elitea-platform, elitea-pipeline, elitea-toolkit, elitea-testing). Use when authoring/deploying ELITEA agents and pipelines, wrapping APIs as ELITEA toolkits, or integrating external systems (GitHub Actions, Power Automate, Teams bots) with ELITEA via REST.",
   "author": {
     "name": "Alexander Bychinskiy",

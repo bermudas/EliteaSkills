@@ -152,14 +152,9 @@ EliteaSkills/
 └── .gitignore
 ```
 
-## Common environments
+## Environment
 
-| Environment | Base URL |
-|---|---|
-| Production | `https://nexus.elitea.ai/` |
-| Pre-prod / "next" | `https://next.elitea.ai/` |
-
-Examples in this repo target `next.elitea.ai`.
+ELITEA runs at **`https://next.elitea.ai/`** — this is the only environment. The legacy `nexus.elitea.ai` host has been retired; if you find references to it in old code or docs, update them to `next.elitea.ai`.
 
 ## Contributing
 

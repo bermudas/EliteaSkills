@@ -6,8 +6,9 @@ The 90% of the platform you'll touch every day. For full endpoint details load `
 
 | Environment | Base URL |
 |---|---|
-| Production | `https://nexus.elitea.ai/` |
-| Pre-prod / "next" | `https://next.elitea.ai/` |
+| ELITEA (sole environment) | `https://next.elitea.ai/` |
+
+> **History note.** Older docs and existing scripts in the wild reference `https://nexus.elitea.ai/` as "production". That host has been retired — `next.elitea.ai` is now the only ELITEA environment. If you see `nexus.elitea.ai` in a config, PAT example, or old code path, replace it with `next.elitea.ai`. Symptom of the old host still being targeted: a `307 → 302 → 400 access_denied` redirect chain through Centry's OIDC gateway. There is no separate "production" vs "pre-prod" — they were consolidated.
 
 **v2 is canonical** — use `/api/v2/elitea_core/...` for everything except these v1-only subsystems:
 
@@ -214,3 +215,37 @@ The `FetchUIContext.yaml` example pipeline shows all of these in action.
 - **Step limit defaults to 25** if `meta.step_limit` is not set on the version.
 - **`return_task_id=true` is mutex with `await_task_timeout > 0`** on `POST /messages/...`.
 - **Toolkit name gets sanitized server-side**: `re.sub(r'[^a-zA-Z0-9_.-]', '', name).replace('.', '_')`. Response `toolkit_name` is the sanitized form.
+- **Tools array shape differs between CREATE and UPDATE.** On `POST /applications/...` each tool entry needs `type`, `toolkit_id`, `toolkit_name`, `name`, `settings`, `selected_tools` (description optional). On `PUT /version/.../{ver_id}` the same entry also needs `author_id`. Missing `author_id` returns `400 [{"loc": ["tools", N, "author_id"], "msg": "Field required"}]`. Easiest path: GET the existing version, mutate, PUT back — see `scripts/update_version_field.py`.
+
+## 11. Model name resolution — do NOT trust short identifiers
+
+`llm_settings.model_name` must be the **exact identifier** returned by the project's models endpoint, not a friendly short name. Wrong names do not error — they silently fall back to the project default (often `gpt-5-mini` or `gpt-5.4-mini`).
+
+Query the live catalog first:
+
+```
+GET /api/v1/configurations/models/{project_id}?include_shared=true
+→ { "total": N, "items": [
+      { "name": "eu.anthropic.claude-sonnet-4-6", "display_name": "Anthropic Claude 4.6 Sonnet",
+        "project_id": 1, "shared": true, "context_window": 400000, "max_output_tokens": 128000,
+        "supports_reasoning": true, "supports_vision": true, ... },
+      ...
+    ] }
+```
+
+Copy `items[].name` verbatim into `llm_settings.model_name` and use `items[].project_id` as `llm_settings.model_project_id`. The shared catalog lives in `project_id=1` (the `promptlib_public` project). Use `scripts/list_models.py` to print a project's catalog.
+
+**To verify your choice actually took effect**, fire a predict and inspect `thinking_steps[].generation_info.model_name` in the response — if it doesn't match what you configured, the runtime fell back. The api-reference dummy examples (`claude-sonnet-4-5`, `claude-opus-4-6`) are **illustrative only**; do not paste them into production payloads without confirming via the models endpoint.
+
+## 12. Direct REST vs MCP — when each one works
+
+ELITEA exposes two surfaces:
+
+| Surface | Read | Write |
+|---|---|---|
+| **MCP (`mcp__elitea-next__*`)** | ✅ Works for GETs (`getProjectsProject`, `getEliteaCoreApplications`, `getEliteaCoreTools`, `getAuthUser`) | ❌ Most write tools (`postEliteaCoreApplications`, `postEliteaCorePredict`, `postEliteaCoreVersions`, `putEliteaCoreVersion`, etc.) expose only `mode`/`project_id` in their schema with `additionalProperties: false` — they cannot carry a JSON body and 415 immediately. |
+| **Direct REST (curl/httpx)** | ✅ | ✅ — required for any operation that needs a body |
+
+> **Rule of thumb:** use MCP tools for reads (cleaner, no auth-host juggling); fall back to direct REST against `next.elitea.ai` (or whichever host your PAT covers — see §1) for any create/update/predict call. The `scripts/build_agent_payload.py` and `scripts/update_version_field.py` helpers exist because of this asymmetry — both pull live state via REST, mutate, and PUT/POST back.
+
+Tangentially: `mcp__elitea-next__getProjectsProject` is mis-described in its schema as "Retrieve a single project" but actually returns **all projects accessible to the caller** when given any valid `project_id` (e.g., your `personal_project_id` from `getAuthUser`). Use that to discover project IDs by name without crawling.
