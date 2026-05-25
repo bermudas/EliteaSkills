@@ -1,0 +1,459 @@
+# Fetch agent, pipeline, toolkit, MCP, chat history, etc, details from ELITEA the user is currently viewing.
+
+# CALL THIS TOOL when the runtime UI context shows that the user is on an entity page:
+# agent, pipeline, toolkit, MCP, app, credential, or conversation.
+
+# Arguments:
+# - project_id: the user's current project_id from runtime UI context.
+# - entity_type: the entity kind, such as "agent", "pipeline", "toolkit", "mcp", "app", "credential", or "conversation".
+# - entity_id: the ID of that entity. This is the same thing as agent_id, pipeline_id, toolkit_id, mcp_id, app_id, credential_id, or conversation_id depending on entity_type.
+# - version_id: optional version ID from runtime UI context. Use 0 if absent.
+
+# Important:
+# The entity_id is usually found in the page URL.
+
+# Examples:
+# - /agents/all/123 means entity_type="agent", entity_id=123
+# - /pipelines/all/545 means entity_type="pipeline", entity_id=545
+# - /toolkits/all/77 means entity_type="toolkit", entity_id=77
+# - /mcp/all/88 means entity_type="mcp", entity_id=88
+# - /apps/all/99 means entity_type="app", entity_id=99
+# - /credentials/all/42 means entity_type="credential", entity_id=42
+
+# Use this tool before answering questions about the user's current setup, configuration, instructions, attached tools, selected toolkit operations, pipeline YAML, model settings, variables, credentials, or troubleshooting.
+
+# Returns a redacted ui_context object with the actual entity configuration. Secrets, tokens, passwords, and API keys are not returned.
+state:
+  entity_id:
+    type: int
+    value: 94
+  entity_type:
+    type: str
+    value: agent
+  input:
+    type: str
+    value: ''
+  messages:
+    type: list
+    value: []
+  project_id:
+    type: int
+    value: 360
+  ui_context:
+    type: dict
+    value: {}
+  version_id:
+    type: int
+    value: 146
+entry_point: parse_ui_context_vars
+nodes:
+  - id: parse_ui_context_vars
+    type: llm
+    input:
+      - input
+    input_mapping:
+      chat_history:
+        type: fixed
+        value: []
+      system:
+        type: fixed
+        value: |-
+          Extract these four values from the task text: project_id, entity_type, entity_id, version_id.
+
+          Return only valid JSON with this exact shape:
+          {
+            "project_id": <integer>,
+            "entity_type": "<agent|pipeline|toolkit|mcp|app|credential|conversation>",
+            "entity_id": <integer>,
+            "version_id": <integer>
+          }
+
+          Rules:
+          - Parse values from patterns like project_id=360, entity_type=agent, entity_id=85, version_id=134.
+          - Cast numeric values to integers.
+          - If version_id is missing, use 0.
+          - If any required value except version_id is missing, set it to null.
+          - Do not include explanations or extra fields.
+      task:
+        type: fstring
+        value: 'input: {input}'
+    output:
+      - entity_id
+      - entity_type
+      - project_id
+      - version_id
+    structured_output: true
+    transition: route_by_entity_type
+  - id: route_by_entity_type
+    type: router
+    condition: |
+      {% set t = entity_type|default('', true)|lower %}
+      {% if t == 'agent' or t == 'pipeline' or t == 'app' %}
+      fetch_application_context
+      {% elif t == 'toolkit' or t == 'mcp' %}
+      fetch_toolkit_context
+      {% elif t == 'credential' %}
+      fetch_credential_context
+      {% elif t == 'conversation' %}
+      fetch_conversation_context
+      {% else %}
+      unsupported_entity_type
+      {% endif %}
+    default_output: unsupported_entity_type
+    input:
+      - entity_type
+    routes:
+      - fetch_application_context
+      - fetch_toolkit_context
+      - fetch_credential_context
+      - fetch_conversation_context
+      - unsupported_entity_type
+  - id: fetch_application_context
+    type: code
+    code:
+      type: fixed
+      value: |
+        target_project_id = elitea_state.get('project_id', 0)
+        target_entity_id = elitea_state.get('entity_id', 0)
+        target_entity_type = (elitea_state.get('entity_type', '') or '').lower()
+        target_version_id = elitea_state.get('version_id', 0)
+
+        SECRET_MARKERS = {
+            'password', 'token', 'api_key', 'secret', 'client_secret',
+            'authorization', 'bearer', 'private_key', 'access_token',
+            'refresh_token', 'webhook_secret', 'x-api-key', 'apikey',
+        }
+
+        def redact(obj):
+            if isinstance(obj, dict):
+                redacted = {}
+                for k, v in obj.items():
+                    key = str(k).lower()
+                    redacted[k] = '***REDACTED***' if any(marker in key for marker in SECRET_MARKERS) else redact(v)
+                return redacted
+            if isinstance(obj, list):
+                return [redact(x) for x in obj]
+            return obj
+
+        result = {
+            'project_id': int(target_project_id) if target_project_id else 0,
+            'entity_id': int(target_entity_id) if target_entity_id else 0,
+            'entity_type': target_entity_type,
+            'version_id': int(target_version_id) if target_version_id else 0,
+            'fetch_method': 'SandboxClient application version API',
+        }
+
+        if not target_project_id:
+            result['error'] = 'project_id missing from UI context'
+        elif not target_entity_id:
+            result['error'] = 'entity_id missing from UI context'
+        elif not int(target_version_id or 0):
+            result['error'] = 'version_id missing from UI context; refusing to fetch full application configuration'
+        else:
+            try:
+                client = SandboxClient(
+                    base_url=elitea_client.base_url,
+                    project_id=int(target_project_id),
+                    auth_token=elitea_client.auth_token,
+                )
+                result['version_details'] = client.get_app_version_details(
+                    int(target_entity_id),
+                    int(target_version_id),
+                )
+            except Exception as e:
+                result['error'] = str(e)
+
+        {'ui_context': redact(result)}
+    input:
+      - entity_id
+      - entity_type
+      - version_id
+      - project_id
+    output:
+      - ui_context
+    structured_output: true
+    transition: present_ui_context
+  - id: fetch_toolkit_context
+    type: code
+    code:
+      type: fixed
+      value: |
+        import httpx
+
+        target_project_id = elitea_state.get('project_id', 0)
+        target_entity_id = elitea_state.get('entity_id', 0)
+        target_entity_type = (elitea_state.get('entity_type', '') or '').lower()
+
+        SECRET_MARKERS = {
+            'password', 'token', 'api_key', 'secret', 'client_secret',
+            'authorization', 'bearer', 'private_key', 'access_token',
+            'refresh_token', 'webhook_secret', 'x-api-key', 'apikey',
+        }
+
+        def redact(obj):
+            if isinstance(obj, dict):
+                redacted = {}
+                for k, v in obj.items():
+                    key = str(k).lower()
+                    redacted[k] = '***REDACTED***' if any(marker in key for marker in SECRET_MARKERS) else redact(v)
+                return redacted
+            if isinstance(obj, list):
+                return [redact(x) for x in obj]
+            return obj
+
+        async def response_payload(resp):
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = {'raw': resp.text}
+            return payload if resp.status_code < 400 else {
+                'error': payload,
+                'status_code': resp.status_code,
+            }
+
+        result = {
+            'project_id': int(target_project_id) if target_project_id else 0,
+            'entity_id': int(target_entity_id) if target_entity_id else 0,
+            'entity_type': target_entity_type,
+            'fetch_method': 'GET /api/v2/elitea_core/tool/prompt_lib/{project_id}/{toolkit_id}',
+        }
+
+        if not target_project_id:
+            result['error'] = 'project_id missing from UI context'
+        elif not target_entity_id:
+            result['error'] = 'entity_id missing from UI context'
+        else:
+            headers = {
+                'Authorization': f'Bearer {elitea_client.auth_token}',
+                'Content-Type': 'application/json',
+            }
+            url = (
+                f"{elitea_client.base_url.rstrip('/')}"
+                f"/api/v2/elitea_core/tool/prompt_lib/{int(target_project_id)}/{int(target_entity_id)}"
+            )
+            try:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as http:
+                    resp = await http.get(url, headers=headers)
+                result['toolkit'] = await response_payload(resp)
+            except Exception as e:
+                result['error'] = str(e)
+
+        {'ui_context': redact(result)}
+    input:
+      - entity_id
+      - entity_type
+      - project_id
+    output:
+      - ui_context
+    structured_output: true
+    transition: present_ui_context
+  - id: fetch_credential_context
+    type: code
+    code:
+      type: fixed
+      value: |
+        import httpx
+
+        target_project_id = elitea_state.get('project_id', 0)
+        target_entity_id = elitea_state.get('entity_id', 0)
+        target_entity_type = (elitea_state.get('entity_type', '') or '').lower()
+
+        SECRET_MARKERS = {
+            'password', 'token', 'api_key', 'secret', 'client_secret',
+            'authorization', 'bearer', 'private_key', 'access_token',
+            'refresh_token', 'webhook_secret', 'x-api-key', 'apikey',
+        }
+
+        def redact(obj):
+            if isinstance(obj, dict):
+                redacted = {}
+                for k, v in obj.items():
+                    key = str(k).lower()
+                    redacted[k] = '***REDACTED***' if any(marker in key for marker in SECRET_MARKERS) else redact(v)
+                return redacted
+            if isinstance(obj, list):
+                return [redact(x) for x in obj]
+            return obj
+
+        async def response_payload(resp):
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = {'raw': resp.text}
+            return payload if resp.status_code < 400 else {
+                'error': payload,
+                'status_code': resp.status_code,
+            }
+
+        result = {
+            'project_id': int(target_project_id) if target_project_id else 0,
+            'entity_id': int(target_entity_id) if target_entity_id else 0,
+            'entity_type': target_entity_type,
+            'fetch_method': 'GET /api/v1/configurations/configuration/{project_id}/{config_id}',
+        }
+
+        if not target_project_id:
+            result['error'] = 'project_id missing from UI context'
+        elif not target_entity_id:
+            result['error'] = 'entity_id missing from UI context'
+        else:
+            headers = {
+                'Authorization': f'Bearer {elitea_client.auth_token}',
+                'Content-Type': 'application/json',
+            }
+            url = (
+                f"{elitea_client.base_url.rstrip('/')}"
+                f"/api/v1/configurations/configuration/{int(target_project_id)}/{int(target_entity_id)}"
+            )
+            try:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as http:
+                    resp = await http.get(url, headers=headers)
+                result['credential'] = await response_payload(resp)
+            except Exception as e:
+                result['error'] = str(e)
+
+        {'ui_context': redact(result)}
+    input:
+      - entity_id
+      - entity_type
+      - project_id
+    output:
+      - ui_context
+    structured_output: true
+    transition: present_ui_context
+  - id: fetch_conversation_context
+    type: code
+    code:
+      type: fixed
+      value: |
+        import httpx
+
+        target_project_id = elitea_state.get('project_id', 0)
+        target_entity_id = elitea_state.get('entity_id', 0)
+        target_entity_type = (elitea_state.get('entity_type', '') or '').lower()
+
+        SECRET_MARKERS = {
+            'password', 'token', 'api_key', 'secret', 'client_secret',
+            'authorization', 'bearer', 'private_key', 'access_token',
+            'refresh_token', 'webhook_secret', 'x-api-key', 'apikey',
+        }
+
+        def redact(obj):
+            if isinstance(obj, dict):
+                redacted = {}
+                for k, v in obj.items():
+                    key = str(k).lower()
+                    redacted[k] = '***REDACTED***' if any(marker in key for marker in SECRET_MARKERS) else redact(v)
+                return redacted
+            if isinstance(obj, list):
+                return [redact(x) for x in obj]
+            return obj
+
+        async def response_payload(resp):
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = {'raw': resp.text}
+            return payload if resp.status_code < 400 else {
+                'error': payload,
+                'status_code': resp.status_code,
+            }
+
+        result = {
+            'project_id': int(target_project_id) if target_project_id else 0,
+            'entity_id': int(target_entity_id) if target_entity_id else 0,
+            'entity_type': target_entity_type,
+            'fetch_method': 'GET conversation details + messages APIs',
+        }
+
+        if not target_project_id:
+            result['error'] = 'project_id missing from UI context'
+        elif not target_entity_id:
+            result['error'] = 'entity_id missing from UI context'
+        else:
+            headers = {
+                'Authorization': f'Bearer {elitea_client.auth_token}',
+                'Content-Type': 'application/json',
+            }
+            base_url = elitea_client.base_url.rstrip('/')
+            conversation_url = (
+                f"{base_url}/api/v2/elitea_core/conversation/prompt_lib/"
+                f"{int(target_project_id)}/{int(target_entity_id)}"
+            )
+            messages_url = (
+                f"{base_url}/api/v2/elitea_core/messages/prompt_lib/"
+                f"{int(target_project_id)}/{int(target_entity_id)}"
+            )
+            try:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as http:
+                    conversation_resp = await http.get(conversation_url, headers=headers)
+                    messages_resp = await http.get(
+                        messages_url,
+                        headers=headers,
+                        params={
+                            'limit': 100,
+                            'offset': 0,
+                            'sort_by': 'created_at',
+                            'sort_order': 'asc',
+                        },
+                    )
+                result['conversation'] = await response_payload(conversation_resp)
+                result['messages'] = await response_payload(messages_resp)
+            except Exception as e:
+                result['error'] = str(e)
+
+        {'ui_context': redact(result)}
+    input:
+      - entity_id
+      - entity_type
+      - project_id
+    output:
+      - ui_context
+    structured_output: true
+    transition: present_ui_context
+  - id: unsupported_entity_type
+    type: code
+    code:
+      type: fixed
+      value: |
+        target_project_id = elitea_state.get('project_id', 0)
+        target_entity_id = elitea_state.get('entity_id', 0)
+        target_entity_type = elitea_state.get('entity_type', '')
+        target_version_id = elitea_state.get('version_id', 0)
+
+        {'ui_context': {
+            'project_id': int(target_project_id) if target_project_id else 0,
+            'entity_id': int(target_entity_id) if target_entity_id else 0,
+            'entity_type': target_entity_type,
+            'version_id': int(target_version_id) if target_version_id else 0,
+            'error': f'Unsupported entity_type: {target_entity_type}',
+            'supported_entity_types': [
+                'agent', 'pipeline', 'app', 'toolkit', 'mcp', 'credential', 'conversation',
+            ],
+        }}
+    input:
+      - entity_id
+      - entity_type
+      - project_id
+      - version_id
+    output:
+      - ui_context
+    structured_output: true
+    transition: present_ui_context
+  - id: present_ui_context
+    type: llm
+    input:
+      - ui_context
+    input_mapping:
+      chat_history:
+        type: fixed
+        value: []
+      system:
+        type: fixed
+        value: Return the ui_context to user as it is.
+      task:
+        type: fstring
+        value: 'ui_context: {ui_context}'
+    output: []
+    structured_output: false
+    transition: END

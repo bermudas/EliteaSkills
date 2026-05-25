@@ -1,0 +1,61 @@
+state:
+  email:
+    type: str
+    value: ''
+  input:
+    type: str
+  messages:
+    type: list
+  personal_project_id:
+    type: str
+    value: ''
+  username:
+    type: str
+    value: ''
+entry_point: fetch_user_details
+nodes:
+  - id: fetch_user_details
+    type: code
+    code:
+      type: fixed
+      value: |-
+        user_info = elitea_client.get_user_data()
+        print(user_info)
+        {
+          'email': user_info['email'],
+          'username': user_info['name'],
+          "personal_project_id": user_info["personal_project_id"]
+        }
+    input: []
+    output:
+      - email
+      - username
+      - personal_project_id
+    structured_output: true
+    transition: return_user_details
+  - id: return_user_details
+    type: llm
+    input:
+      - email
+      - personal_project_id
+      - username
+    input_mapping:
+      chat_history:
+        type: fixed
+        value: []
+      system:
+        type: fixed
+        value: |
+          return the following user details:
+          - email
+          - username
+          - personal_project_id
+      task:
+        type: fstring
+        value: |-
+          - email: {email}
+          - username: {username}
+          - personal_project_id: {personal_project_id}
+    output: []
+    structured_output: false
+    transition: END

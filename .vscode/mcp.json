@@ -1,0 +1,29 @@
+{
+  "servers": {       
+     "Elitea_Next":
+      {
+        "type": "sse",
+        "url": "https://next.elitea.ai/app/${input:projectid}/sse",
+        "headers": {
+          "Authorization": "Bearer ${input:dev-elitea-token}"
+        }
+      }
+
+}
+,
+
+
+"inputs": [
+  {
+    "type": "promptString",
+    "id": "dev-elitea-token",
+    "description": "Elitea NEXT API Key",
+    "password": true
+  },   {
+    "type": "promptString",
+    "id": "projectid",
+    "description": "Elitea project id",
+    "password": false
+  }
+]
+      }

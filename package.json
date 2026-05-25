@@ -1,0 +1,36 @@
+{
+  "name": "elitea-skills",
+  "version": "0.1.0",
+  "description": "Claude-Code-native ELITEA platform toolkit — 2 agents (elitea-builder, elitea-integrator) and 4 skills (elitea-platform, elitea-pipeline, elitea-toolkit, elitea-testing) for building, deploying, testing, and integrating ELITEA artifacts.",
+  "author": {
+    "name": "Alexander Bychinskiy",
+    "url": "https://github.com/Bermudas"
+  },
+  "repository": "https://github.com/Bermudas/EliteaSkills",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "init": "./bin/init.mjs"
+  },
+  "files": [
+    "agents/",
+    "skills/",
+    "bin/",
+    ".claude-plugin/",
+    ".cursor-plugin/",
+    "README.md",
+    "CLAUDE.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "keywords": [
+    "elitea",
+    "agents",
+    "skills",
+    "claude-code",
+    "pipelines",
+    "toolkits",
+    "openapi",
+    "mcp"
+  ]
+}

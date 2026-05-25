@@ -1,0 +1,137 @@
+state:
+  description:
+    type: str
+    value: ''
+  input:
+    type: str
+  messages:
+    type: list
+  schema:
+    type: str
+    value: ''
+  status:
+    type: str
+    value: ''
+  tool_name:
+    type: str
+    value: appendData
+  toolkit_id:
+    type: str
+    value: artifact
+entry_point: LLM 1
+nodes:
+  - id: get_tool_schema
+    type: code
+    code:
+      type: fstring
+      value: |-
+        # Retrieve credentials and target parameters
+        auth_token = alita_client.unsecret('auth_token')
+        target_toolkit ="{toolkit_id}"
+        target_tool = "{tool_name}"
+
+        url = "https://next.elitea.ai/api/v2/elitea_core/toolkits/prompt_lib/630"
+
+        import httpx
+
+        result = None
+
+        if not target_toolkit or not target_tool:
+            result = {"status": "error", "message": "Missing toolkit_id or tool_name in state"}
+        else:
+            async with httpx.AsyncClient() as client:
+                headers = {"Authorization": f"Bearer {auth_token}"}
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+
+            toolkit_data = data.get(target_toolkit)
+            if not toolkit_data:
+                result = {"status": "error", "message": f"Toolkit '{target_toolkit}' not found"}
+            else:
+                tools_schemas = toolkit_data.get("properties", {}).get("selected_tools", {}).get("args_schemas", {})
+                tool_schema = tools_schemas.get(target_tool)
+
+                if not tool_schema:
+                    result = {"status": "error", "message": f"Tool '{target_tool}' not found in toolkit '{target_toolkit}'"}
+                else:
+                    result = {
+                        "status": "success",
+                        "toolkit_id": target_toolkit,
+                        "tool_name": target_tool,
+                        "schema": tool_schema,
+                        "description": tool_schema.get("description", "No description available")
+                    }
+
+        # The final expression returned to the pipeline
+        result
+    input:
+      - tool_name
+      - toolkit_id
+    output:
+      - status
+      - schema
+      - description
+    structured_output: true
+    transition: StateModifier 1
+  - id: print_toolkits
+    type: printer
+    interrupt_after: true
+    interrupt_before: false
+    final_message: |+
+
+    input:
+      available_toolkits: '{{available_toolkits}}'
+    input_mapping:
+      printer:
+        type: variable
+        value: description
+    transition: END
+  - id: StateModifier 1
+    type: state_modifier
+    input:
+      - tool_name
+      - description
+      - toolkit_id
+      - schema
+      - status
+    output:
+      - description
+    template: |2-
+          # 🔍 Tool Details: {{tool_name}}
+          
+          **Description:**
+          > {{description}}
+          
+          **Input Parameters (JSON Schema):**
+          ```json
+          {{schema | tojson(indent=2)}}
+    transition: print_toolkits
+    variables_to_clean: []
+  - id: LLM 1
+    type: llm
+    input:
+      - input
+    input_mapping:
+      chat_history:
+        type: fixed
+        value: []
+      system:
+        type: fixed
+        value: |-
+          parse tool name and toolkit_id from input and respond with json. Default is 
+
+            tool_name:
+              type: str
+              value: appendData
+            toolkit_id:
+              type: str
+              value: artifact
+      task:
+        type: variable
+        value: input
+    output:
+      - tool_name
+      - toolkit_id
+    structured_output: true
+    transition: get_tool_schema

@@ -1,0 +1,273 @@
+state:
+  available_toolkits:
+    type: str
+    value: ''
+  input:
+    type: str
+  messages:
+    type: list
+  project_id:
+    type: str
+    value: ''
+  status:
+    type: str
+    value: ''
+  toolkits:
+    type: str
+    value: ''
+  total_discovered:
+    type: str
+    value: ''
+entry_point: list_filtered_tools
+nodes:
+  - id: list_filtered_tools
+    type: code
+    code:
+      type: fixed
+      value: |
+        # Retrieve secret and context
+        auth_token = alita_client.unsecret('auth_token')
+        # Project ID 630 as requested
+        project_id = 630
+
+        import httpx
+        import json
+        import asyncio
+
+        async def fetch_tools(client, url, headers):
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+
+        def extract_openapi_schema(spec, tool_name, method, path):
+            """
+            Extracts parameter schema for a specific operation in an OpenAPI spec.
+            """
+            if isinstance(spec, str):
+                try:
+                    spec = json.loads(spec)
+                except:
+                    return None
+                    
+            # Normalize path and method
+            # If path or method is none, search by operationId (tool_name)
+            operation = {}
+            if path and method:
+                path_obj = spec.get("paths", {}).get(path, {})
+                operation = path_obj.get(method.lower(), {})
+            else:
+                # Search all paths for operationId == tool_name
+                for p, p_data in spec.get("paths", {}).items():
+                    for m, m_data in p_data.items():
+                        if isinstance(m_data, dict) and m_data.get("operationId") == tool_name:
+                            operation = m_data
+                            method = m
+                            path = p
+                            break
+                    if operation: break
+            
+            if not operation:
+                return None
+
+            path_obj = spec.get("paths", {}).get(path, {})
+            
+            # Bundle parameters into a schema-like structure
+            properties = {}
+            required = []
+            
+            # 1. Path/Query/Header Parameters
+            params = operation.get("parameters", [])
+            # Also check path-level parameters
+            params.extend(path_obj.get("parameters", []))
+            
+            for p in params:
+                name = p.get("name")
+                p_schema = p.get("schema", {"type": "string"})
+                properties[name] = {
+                    "type": p_schema.get("type", "string"),
+                    "description": p.get("description", ""),
+                    "in": p.get("in") # query, path, etc
+                }
+                if p.get("required"):
+                    required.append(name)
+                    
+            # 2. Request Body (JSON)
+            body = operation.get("requestBody", {})
+            content = body.get("content", {}).get("application/json", {})
+            body_schema = content.get("schema", {})
+            
+            if body_schema:
+                # If it's an object, merge properties
+                if body_schema.get("type") == "object":
+                    properties.update(body_schema.get("properties", {}))
+                    required.extend(body_schema.get("required", []))
+                else:
+                    properties["body"] = body_schema
+
+            return {
+                "type": "object",
+                "properties": properties,
+                "required": list(set(required))
+            }
+
+        async def run_discovery():
+            all_toolkits = []
+            
+            # Standard tools endpoint
+            url_std = f"https://next.elitea.ai/api/v2/elitea_core/tools/prompt_lib/{project_id}?limit=100"
+            # MCP-specific tools endpoint
+            url_mcp = f"https://next.elitea.ai/api/v2/elitea_core/tools/prompt_lib/{project_id}?mcp=true&limit=100"
+            
+            headers = {"Authorization": f"Bearer {auth_token}"}
+            
+            async with httpx.AsyncClient() as client:
+                # Fetch both in parallel for efficiency
+                std_data, mcp_data = await asyncio.gather(
+                    fetch_tools(client, url_std, headers),
+                    fetch_tools(client, url_mcp, headers)
+                )
+                
+            # Helper to avoid duplicates
+            existing_ids = set()
+
+            # 1. Process Standard Toolkits (GitHub, Jira, Artifact, OpenAPI, etc.)
+            for row in std_data.get("rows", []):
+                tk_id = row.get("id")
+                if tk_id in existing_ids: continue
+                
+                meta = row.get("meta", {}) or {}
+                categories = meta.get("categories", []) or []
+                
+                # Filtering: Skip nodes that are marked as hidden or internal
+                if meta.get("hidden") or "internal_tool" in categories:
+                    continue
+                    
+                toolkit_type = row.get("type")
+                settings = row.get("settings", {}) or {}
+                raw_tools = settings.get("selected_tools", []) or []
+                
+                processed_tools = []
+                
+                # OpenAPI toolkits parsing
+                if toolkit_type == "openapi":
+                    spec = settings.get("schema_settings") or settings.get("spec")
+                    for tool in raw_tools:
+                        if isinstance(tool, dict):
+                            name = tool.get("name")
+                            method = tool.get("method", "get")
+                            path = tool.get("path")
+                        else:
+                            name = tool
+                            method = None
+                            path = None
+                            
+                        # FETCH SCHEMA from spec
+                        schema = None
+                        if spec:
+                            schema = extract_openapi_schema(spec, name, method, path)
+                        
+                        processed_tools.append({
+                            "name": name,
+                            "description": tool.get("description") if isinstance(tool, dict) else "",
+                            "method": method,
+                            "path": path,
+                            "input_schema": schema # Now enriched!
+                        })
+                else:
+                    # Most standard toolkits just have a list of strings
+                    for tool in raw_tools:
+                        processed_tools.append({"name": str(tool)})
+
+                all_toolkits.append({
+                    "id": tk_id,
+                    "name": row.get("name"),
+                    "type": toolkit_type,
+                    "source": "Standard",
+                    "description": row.get("description", ""),
+                    "tools": processed_tools
+                })
+                existing_ids.add(tk_id)
+
+            # 2. Process MCP Toolkits
+            for row in mcp_data.get("rows", []):
+                tk_id = row.get("id")
+                if tk_id in existing_ids:
+                    continue
+                    
+                settings = row.get("settings", {}) or {}
+                mcp_tools_raw = settings.get("available_mcp_tools", []) or []
+                
+                processed_tools = []
+                for tool in mcp_tools_raw:
+                    processed_tools.append({
+                        "name": tool.get("value"),
+                        "description": tool.get("description"),
+                        "input_schema": tool.get("args_schema") # MCP provides schema here!
+                    })
+                    
+                all_toolkits.append({
+                    "id": tk_id,
+                    "name": row.get("name"),
+                    "type": row.get("type"),
+                    "source": "MCP",
+                    "description": row.get("description", ""),
+                    "tools": processed_tools
+                })
+                existing_ids.add(tk_id)
+
+            return {
+                "status": "success",
+                "project_id": project_id,
+                "total_discovered": len(all_toolkits),
+                "toolkits": all_toolkits
+            }
+
+        # Execute discovery in the node's async context
+        await run_discovery()
+    output:
+      - project_id
+      - status
+      - toolkits
+      - total_discovered
+    structured_output: true
+    transition: StateModifier 1
+  - id: print_toolkits
+    type: printer
+    interrupt_after: true
+    interrupt_before: false
+    final_message: |2-
+
+       If MCP, the schema is already in state. If Standard, 
+              # this node would use the another tool to get tool/tookit schema
+    input:
+      available_toolkits: '{{available_toolkits}}'
+    input_mapping:
+      printer:
+        type: variable
+        value: available_toolkits
+    transition: END
+  - id: StateModifier 1
+    type: state_modifier
+    input:
+      - total_discovered
+      - toolkits
+    output:
+      - available_toolkits
+    template: |-
+      I found **{{total_discovered}}** integrations in Project 630.
+      {% for tk in toolkits %}
+      ### 📦 {{tk.name}} ({{tk.type}})
+      {% for tool in tk.tools %}
+      - **{{ tool.name }}** 
+        {% if tool.input_schema %}
+        *Parameters:* {{ tool.input_schema.properties.keys() | list | join(", ") }}
+        {% endif %}
+        {% if tool.path %}
+        *Endpoint:* {{ tool.method | upper }} {{ tool.path }}
+        {% endif %}
+        *Description:* {{ tool.description | truncate(100) }}
+      {% endfor %}
+      ---
+      {% endfor %}
+    transition: print_toolkits
+    variables_to_clean: []

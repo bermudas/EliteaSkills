@@ -1,0 +1,29 @@
+state:
+  input:
+    type: str
+  messages:
+    type: list
+entry_point: Code 1
+nodes:
+  - id: Code 1
+    type: code
+    code:
+      type: fixed
+      value: |-
+        import time
+
+        try:
+            print("Starting 2-minute wait...")
+            time.sleep(120)
+            print("Wait completed!")
+            result = {"status": "completed", "wait_time_seconds": 240}
+        except Exception as e:
+            print(f"Error occurred: {str(e)}")
+            result = {"status": "failed", "error": str(e)}
+
+        result
+    input: []
+    output:
+      - messages
+    structured_output: false
+    transition: END

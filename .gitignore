@@ -1,0 +1,41 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Installer output — this repo is a DISTRIBUTION package. The canonical
+# sources are agents/ and skills/ at root. `.claude/` and other IDE dirs
+# only exist when a developer runs `node bin/init.mjs` locally to self-test.
+.claude/
+.cursor/
+.windsurf/
+
+# Note: .github/ is NOT ignored — workflows live there (e.g. CI). Just
+# `.github/agents/` is ignored to avoid the Copilot self-install output
+# polluting commits.
+.github/agents/
+
+# OS / editor droppings
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*~
+.idea/
+*.iml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/

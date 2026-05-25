@@ -1,0 +1,933 @@
+entry_point: FetchAndClassify
+
+state:
+  messages:
+    type: list
+  report_md:
+    type: str
+    value: ''
+
+nodes:
+  - id: FetchAndClassify
+    type: code
+    code:
+      type: fixed
+      value: |
+        import asyncio
+        import json
+        import re
+        import httpx
+        from datetime import datetime, timedelta, timezone
+
+        re  # ensure name bound before parse-args block below
+
+        DEFAULT_PROJECT_ID = 630
+        DEFAULT_DAYS_BACK = 7
+        USER_TIMEOUT_MINUTES = 15
+        # A streaming-but-empty assistant group is only treated as hung once it
+        # has been streaming for at least this many minutes. Below the threshold
+        # the predict is considered actively running and we report it as `active`.
+        ASSISTANT_HUNG_MINUTES = 10
+        MAX_CONVERSATIONS = 300
+        PAGE_SIZE = 50
+        PARALLEL_DETAIL_FETCH = 30
+
+        # Parse user_input
+        user_input = (elitea_state.get('input', '') or '').strip()
+
+        # project=NNN override (otherwise DEFAULT_PROJECT_ID)
+        m_proj = re.search(r'project\s*[=: ]\s*(\d+)', user_input, re.IGNORECASE)
+        PROJECT_ID = int(m_proj.group(1)) if m_proj else DEFAULT_PROJECT_ID
+
+        # Days-back: a bare integer like "1 day" / "30d" / "2"
+        # (must NOT swallow the project= number — strip that first)
+        u_no_proj = re.sub(r'project\s*[=: ]\s*\d+', '', user_input, flags=re.IGNORECASE)
+        m_days = re.search(r'(\d+)\s*(?:day|days|d)?\b', u_no_proj) if u_no_proj else None
+        DAYS_BACK = int(m_days.group(1)) if m_days else DEFAULT_DAYS_BACK
+        DAYS_BACK = max(1, min(DAYS_BACK, 90))
+
+        # 'apply' keyword switches from DRY-RUN to actually sending nudges.
+        APPLY = bool(re.search(r'\bapply\b', user_input, re.IGNORECASE))
+
+        # Filter to Teams-only conversations (those with name starting "Teams:")
+        TEAMS_ONLY = True
+
+        # Marker we put into every nudge — used for idempotency on re-runs
+        NUDGE_MARKER = '[Pipeline retry — operator-triggered]'
+
+        headers = {
+            'Authorization': f'Bearer {elitea_client.auth_token}',
+            'Accept': 'application/json',
+        }
+        base_url = elitea_client.base_url.rstrip('/')
+        cutoff = datetime.now(timezone.utc) - timedelta(days=DAYS_BACK)
+
+        def parse_ts(s):
+            if not s:
+                return None
+            if s.endswith('Z'):
+                s = s[:-1]
+            has_offset = len(s) >= 6 and s[-6] in '+-' and s[-3] == ':'
+            if not has_offset:
+                s = s + '+00:00'
+            try:
+                return datetime.fromisoformat(s)
+            except Exception:
+                return None
+
+        ERROR_RE = re.compile(
+            r'(An unexpected error|error occurred|Traceback|OperationalError|'
+            r'RateLimitError|TimeoutError|ConnectionError)',
+            re.IGNORECASE,
+        )
+
+        def normalize_text(content):
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        parts.append(str(item.get('text') or item.get('content') or ''))
+                    else:
+                        parts.append(str(item))
+                return ' '.join(parts)
+            if isinstance(content, dict):
+                return str(content.get('text') or content.get('content') or content)
+            return str(content) if content is not None else ''
+
+        def last_text_of_group(group):
+            text_chunks = []
+            for it in (group.get('message_items') or []):
+                if it.get('item_type') == 'text_message':
+                    text_chunks.append(normalize_text((it.get('item_details') or {}).get('content')))
+            return ' '.join(text_chunks).strip()
+
+        def enrich(detail):
+            """Cheap signals from data already in the detail response."""
+            groups = detail.get('message_groups') or []
+            participants = detail.get('participants') or []
+            meta = detail.get('meta') or {}
+
+            agent_ids = sorted({
+                (p.get('entity_meta') or {}).get('id')
+                for p in participants
+                if p.get('entity_name') == 'application'
+                and (p.get('entity_meta') or {}).get('id') is not None
+            })
+
+            tool_ok = 0
+            tool_err = 0
+            tool_err_names = {}
+            for g in groups:
+                tcs = (g.get('meta') or {}).get('tool_calls') or {}
+                for tc in tcs.values():
+                    fr = (tc.get('finish_reason') or '').lower()
+                    if fr == 'error':
+                        tool_err += 1
+                        name = tc.get('tool_name') or '?'
+                        tool_err_names[name] = tool_err_names.get(name, 0) + 1
+                    elif fr == 'stop':
+                        tool_ok += 1
+
+            top_failing_tool = None
+            if tool_err_names:
+                top_failing_tool = max(tool_err_names.items(), key=lambda kv: kv[1])
+
+            ctx_strat = meta.get('context_strategy') or {}
+            ctx_analy = meta.get('context_analytics') or {}
+            current_tok = ctx_analy.get('current_context_tokens')
+            max_tok = ctx_strat.get('max_context_tokens')
+            pressure = None
+            if isinstance(current_tok, (int, float)) and isinstance(max_tok, (int, float)) and max_tok > 0:
+                pressure = round(current_tok / max_tok, 2)
+
+            return {
+                'agent_ids': agent_ids,
+                'tool_ok_count': tool_ok,
+                'tool_error_count': tool_err,
+                'top_failing_tool': (
+                    f'{top_failing_tool[0]}×{top_failing_tool[1]}'
+                    if top_failing_tool else None
+                ),
+                'context_pressure': pressure,
+                'context_tokens': current_tok,
+                'max_context_tokens': max_tok,
+                'summaries_generated': ctx_analy.get('summaries_generated'),
+            }
+
+        def classify(groups, user_pids):
+            """Classify based on the LAST message group. `user_pids` may be
+            empty when called against the messages endpoint (no participants
+            array available); we fall back to author_participant_id heuristics."""
+            if not groups:
+                return {
+                    'status': 'empty',
+                    'failure': 'no',
+                    'failure_reason': None,
+                    'last_group_id': None,
+                    'evidence': 'no message_groups returned',
+                }
+
+            try:
+                groups_sorted = sorted(
+                    groups,
+                    key=lambda g: parse_ts(g.get('created_at', '')) or datetime.min.replace(tzinfo=timezone.utc),
+                )
+            except Exception:
+                groups_sorted = groups
+            last = groups_sorted[-1]
+
+            last_pid = last.get('author_participant_id')
+            if user_pids:
+                last_is_user = last_pid in user_pids
+            else:
+                # Fallback: assistant groups typically have a task_id, user groups don't
+                # AND assistant groups have non-empty meta.tool_calls or message_items
+                # with text from agents. Heuristic only.
+                meta = last.get('meta') or {}
+                last_is_user = (
+                    not last.get('task_id')
+                    and not (meta.get('tool_calls') or {})
+                    and not last.get('is_streaming')
+                )
+            last_streaming = bool(last.get('is_streaming'))
+            last_task_id = last.get('task_id')
+            last_items = last.get('message_items') or []
+            last_text = last_text_of_group(last)
+
+            # Pattern A: streaming-but-empty assistant group
+            # - Active (< ASSISTANT_HUNG_MINUTES old) → status=active (don't nudge)
+            # - Stale (>= threshold) → status=errored, hung
+            if not last_is_user and last_streaming and not last_items and last_task_id:
+                last_ts = parse_ts(last.get('created_at', ''))
+                age_min = None
+                if last_ts:
+                    age_min = (datetime.now(timezone.utc) - last_ts).total_seconds() / 60.0
+                if age_min is None or age_min >= ASSISTANT_HUNG_MINUTES:
+                    return {
+                        'status': 'errored',
+                        'failure': 'yes',
+                        'failure_reason': f'hung: predict streaming for {int(age_min) if age_min is not None else "?"}m (>= {ASSISTANT_HUNG_MINUTES}m threshold)',
+                        'last_group_id': last.get('id'),
+                        'evidence': f'is_streaming=True items=0 task_id={last_task_id[:8]}',
+                    }
+                # Active in-flight predict — leave it alone
+                return {
+                    'status': 'active',
+                    'failure': 'no',
+                    'failure_reason': None,
+                    'last_group_id': last.get('id'),
+                    'evidence': f'predict actively running ({int(age_min)}m old, threshold {ASSISTANT_HUNG_MINUTES}m)',
+                }
+
+            # Pattern B: explicit error string in the LAST assistant message text
+            if not last_is_user and last_text:
+                m = ERROR_RE.search(last_text[:600])
+                if m:
+                    return {
+                        'status': 'errored',
+                        'failure': 'yes',
+                        'failure_reason': f'explicit error: {m.group(0)}',
+                        'last_group_id': last.get('id'),
+                        'evidence': last_text[:200],
+                    }
+
+            # Pattern C: last group is a user message → check timeout
+            if last_is_user:
+                last_ts = parse_ts(last.get('created_at', ''))
+                age_min = None
+                if last_ts:
+                    age_min = (datetime.now(timezone.utc) - last_ts).total_seconds() / 60.0
+                if age_min is not None and age_min >= USER_TIMEOUT_MINUTES:
+                    return {
+                        'status': 'errored',
+                        'failure': 'yes',
+                        'failure_reason': f'timeout: no reply within {USER_TIMEOUT_MINUTES}m (age={int(age_min)}m)',
+                        'last_group_id': last.get('id'),
+                        'evidence': f'user msg at {last.get("created_at")}, no assistant follow-up',
+                    }
+                return {
+                    'status': 'pending',
+                    'failure': 'no',
+                    'failure_reason': None,
+                    'last_group_id': last.get('id'),
+                    'evidence': f'awaiting reply (age={int(age_min) if age_min is not None else "?"}m)',
+                }
+
+            # Otherwise the assistant produced content — count as completed
+            return {
+                'status': 'completed',
+                'failure': 'no',
+                'failure_reason': None,
+                'last_group_id': last.get('id'),
+                'evidence': last_text[:140] if last_text else 'assistant produced non-text content',
+            }
+
+        async def fetch_list_page(client, offset):
+            url = f'{base_url}/api/v2/elitea_core/conversations/prompt_lib/{PROJECT_ID}'
+            resp = await client.get(url, headers=headers, params={
+                'limit': PAGE_SIZE,
+                'offset': offset,
+                'sort_by': 'updated_at',
+                'sort_order': 'desc',
+            })
+            if resp.status_code >= 400:
+                return None, resp.status_code
+            return resp.json(), 200
+
+        async def fetch_last_messages(client, cid, limit=2):
+            """Lightweight: last N message groups, with full meta.tool_calls."""
+            url = f'{base_url}/api/v2/elitea_core/messages/prompt_lib/{PROJECT_ID}/{cid}'
+            resp = await client.get(url, headers=headers, params={
+                'limit': limit,
+                'sort_order': 'desc',
+            })
+            if resp.status_code >= 400:
+                return None
+            try:
+                return resp.json()
+            except Exception:
+                return None
+
+        async def fetch_full_detail(client, cid):
+            """Heavyweight: full conversation with participants + all groups.
+            Called only for non-completed convs (Pass 3)."""
+            url = f'{base_url}/api/v2/elitea_core/conversation/prompt_lib/{PROJECT_ID}/{cid}'
+            resp = await client.get(url, headers=headers)
+            if resp.status_code >= 400:
+                return None
+            try:
+                return resp.json()
+            except Exception:
+                return None
+
+        def tool_stats_for_groups(groups):
+            ok = 0; err = 0; err_names = {}
+            for g in groups:
+                tcs = (g.get('meta') or {}).get('tool_calls') or {}
+                for tc in tcs.values():
+                    fr = (tc.get('finish_reason') or '').lower()
+                    if fr == 'error':
+                        err += 1
+                        n = tc.get('tool_name') or '?'
+                        err_names[n] = err_names.get(n, 0) + 1
+                    elif fr == 'stop':
+                        ok += 1
+            top = max(err_names.items(), key=lambda kv: kv[1]) if err_names else None
+            return ok, err, (f'{top[0]}×{top[1]}' if top else None)
+
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            # ───── Pass 1: list pages, filter by updated_at ─────
+            recent = []
+            offset = 0
+            errors = []
+            while len(recent) < MAX_CONVERSATIONS:
+                page, status = await fetch_list_page(client, offset)
+                if status != 200 or not page:
+                    errors.append(f'list offset={offset} status={status}')
+                    break
+                rows_page = page.get('rows') or []
+                if not rows_page:
+                    break
+                for row in rows_page:
+                    ts = parse_ts(row.get('updated_at') or row.get('created_at') or '')
+                    if not ts or ts < cutoff:
+                        continue
+                    if TEAMS_ONLY and not (row.get('name') or '').startswith('Teams:'):
+                        continue
+                    recent.append(row)
+                last_ts = parse_ts(rows_page[-1].get('updated_at') or rows_page[-1].get('created_at') or '')
+                if not last_ts or last_ts < cutoff:
+                    break
+                offset += PAGE_SIZE
+            recent = recent[:MAX_CONVERSATIONS]
+
+            # ───── Pass 2: last 2 messages per conv (lightweight) ─────
+            sem = asyncio.Semaphore(PARALLEL_DETAIL_FETCH)
+
+            async def fetch_msgs(cid):
+                async with sem:
+                    return cid, await fetch_last_messages(client, cid, limit=2)
+
+            msg_results = await asyncio.gather(
+                *(fetch_msgs(c['id']) for c in recent),
+                return_exceptions=False,
+            )
+            msgs_by_cid = {cid: data for cid, data in msg_results}
+
+            # Build initial rows with classification from last 2 groups
+            list_meta_by_cid = {c['id']: c for c in recent}
+            rows = []
+            need_full_detail = []
+            for cid in [c['id'] for c in recent]:
+                conv_row = list_meta_by_cid[cid]
+                msgs = msgs_by_cid.get(cid)
+                if msgs is None:
+                    rows.append({
+                        'id': cid,
+                        'name': conv_row.get('name'),
+                        'updated_at': conv_row.get('updated_at'),
+                        'status': 'errored',
+                        'failure': 'yes',
+                        'failure_reason': 'messages fetch failed',
+                        'last_group_id': None,
+                        'evidence': None,
+                    })
+                    continue
+
+                groups = msgs.get('rows') or []  # desc order, last N
+                cls = classify(groups, user_pids=set())  # no participants yet
+
+                # Tool stats just for the LAST 2 groups (cheap signal)
+                ok2, err2, top_tool_2 = tool_stats_for_groups(groups)
+
+                # context_pressure FREE from list-endpoint meta
+                m = conv_row.get('meta') or {}
+                ctx_strat = m.get('context_strategy') or {}
+                ctx_analy = m.get('context_analytics') or {}
+                ctok = ctx_analy.get('current_context_tokens')
+                mtok = ctx_strat.get('max_context_tokens')
+                pressure = None
+                if isinstance(ctok, (int, float)) and isinstance(mtok, (int, float)) and mtok > 0:
+                    pressure = round(ctok / mtok, 2)
+
+                rows.append({
+                    'id': cid,
+                    'name': conv_row.get('name'),
+                    'created_at': conv_row.get('created_at'),
+                    'updated_at': conv_row.get('updated_at'),
+                    'source': conv_row.get('source'),
+                    'message_groups_count': conv_row.get('message_groups_count'),
+                    'participants_count': conv_row.get('participants_count'),
+                    'agent_id': None,  # filled in Pass 3 only if needed
+                    'tool_ok_in_last2': ok2,
+                    'tool_error_in_last2': err2,
+                    'tool_error_count': err2,  # default; refined in Pass 3 for non-completed
+                    'top_failing_tool': top_tool_2,
+                    'context_pressure': pressure,
+                    'context_tokens': ctok,
+                    'max_context_tokens': mtok,
+                    'summaries_generated': ctx_analy.get('summaries_generated'),
+                    **cls,
+                })
+
+                # Schedule full detail ONLY for non-completed convs
+                if cls.get('status') in ('errored', 'pending'):
+                    need_full_detail.append(cid)
+
+            # ───── Pass 3: full detail for non-completed convs only ─────
+            async def fetch_detail_bounded(cid):
+                async with sem:
+                    return cid, await fetch_full_detail(client, cid)
+
+            full_details = {}
+            if need_full_detail:
+                full_results = await asyncio.gather(
+                    *(fetch_detail_bounded(cid) for cid in need_full_detail),
+                    return_exceptions=False,
+                )
+                full_details = {cid: d for cid, d in full_results if d is not None}
+
+        # Enrich non-completed rows with agent_id + whole-conv tool error count
+        for r in rows:
+            if r['id'] not in full_details:
+                continue
+            detail = full_details[r['id']]
+            participants = detail.get('participants') or []
+            user_pids = {p.get('id') for p in participants if p.get('entity_name') == 'user'}
+            agent_ids = sorted({
+                (p.get('entity_meta') or {}).get('id')
+                for p in participants
+                if p.get('entity_name') == 'application'
+                and (p.get('entity_meta') or {}).get('id') is not None
+            })
+            r['agent_id'] = agent_ids[0] if agent_ids else None
+            all_groups = detail.get('message_groups') or []
+            ok_all, err_all, top_tool_all = tool_stats_for_groups(all_groups)
+            r['tool_ok_count'] = ok_all
+            r['tool_error_count'] = err_all
+            r['top_failing_tool'] = top_tool_all
+            # Re-run classification with real user_pids (more accurate)
+            cls2 = classify(all_groups, user_pids=user_pids)
+            r.update(cls2)
+
+        passes_summary = {
+            'list_pages_fetched': (offset // PAGE_SIZE) + 1,
+            'pass2_msg_fetches': len(msgs_by_cid),
+            'pass3_full_detail_fetches': len(full_details),
+            'parallelism': PARALLEL_DETAIL_FETCH,
+        }
+
+        # ───── Build nudge plan for errored conversations ─────
+        # For each errored conv, extract the user's last question text and the
+        # agent participant_id (target of the nudge). Then either dry-run-print
+        # or actually POST the nudge.
+
+        def _decode_text(raw):
+            """Make raw user content readable: handle escaped newlines, &nbsp;, HTML tags."""
+            if not isinstance(raw, str):
+                raw = normalize_text(raw)
+            text = raw
+            # Replace HTML entities
+            text = text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
+            # Replace literal \n / \r escape sequences with real newlines
+            text = text.replace('\\n', '\n').replace('\\r', '\n').replace('\\t', '\t')
+            return text
+
+        def _strip_inner_tags(s):
+            s = re.sub(r'<[^>]+>', ' ', s)
+            s = re.sub(r'[ \t]+', ' ', s).strip()
+            return s
+
+        def parse_teams_user_message(content):
+            """Pull apart a Teams user message into:
+              - latest_question (str): what the user actually asked this turn
+              - reply_instructions (str): the raw <ReplyInstructions>...</...> block
+                  the agent needs for Teams routing (ReplyTeamsMessage tool)
+              - history_lines (list[dict]): parsed history entries [{ts, who, text}]
+            Handles both closed and unclosed <ChatHistory>/<ReplyInstructions> tags.
+            """
+            text = _decode_text(content)
+            # Remove "Foo asks:" prefix
+            text = re.sub(r'^\s*[^<:\n]{1,80}\s+asks:\s*', '', text)
+
+            # Capture (don't drop) ReplyInstructions — preserve verbatim for the agent
+            reply_instr = ''
+            ri_match = re.search(r'<ReplyInstructions>(.*?)(?:</ReplyInstructions>|$)', text, flags=re.DOTALL)
+            if ri_match:
+                reply_instr = ri_match.group(1).strip()
+                text = text[:ri_match.start()] + text[ri_match.end():]
+
+            # Capture ChatHistory (also may be unclosed)
+            history_match = re.search(r'<ChatHistory>(.*?)(?:</ChatHistory>|$)', text, flags=re.DOTALL)
+            history_raw = ''
+            if history_match:
+                history_raw = history_match.group(1)
+                text = text[:history_match.start()] + text[history_match.end():]
+
+            latest_question = _strip_inner_tags(text)
+
+            history_lines = []
+            for line in history_raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                m = re.match(r'^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)\s*\|\s*([^|]+?)\s*\|\s*(.*)$', line)
+                if m:
+                    history_lines.append({
+                        'ts': m.group(1),
+                        'who': m.group(2).strip(),
+                        'text': _strip_inner_tags(m.group(3))[:400],
+                    })
+
+            return latest_question, reply_instr, history_lines
+
+        def extract_last_user_message(detail):
+            participants = detail.get('participants') or []
+            user_pids = {p.get('id') for p in participants if p.get('entity_name') == 'user'}
+            groups = detail.get('message_groups') or []
+            sorted_g = sorted(
+                groups,
+                key=lambda g: parse_ts(g.get('created_at', '')) or datetime.min.replace(tzinfo=timezone.utc),
+            )
+            for g in reversed(sorted_g):
+                if g.get('author_participant_id') in user_pids:
+                    for it in (g.get('message_items') or []):
+                        if it.get('item_type') == 'text_message':
+                            return (it.get('item_details') or {}).get('content') or ''
+            return None
+
+        def find_agent_participant_id(detail):
+            for p in (detail.get('participants') or []):
+                if p.get('entity_name') == 'application':
+                    return p.get('id')
+            return None
+
+        def _is_nudge_group(g):
+            for it in (g.get('message_items') or []):
+                if it.get('item_type') != 'text_message':
+                    continue
+                c = ((it.get('item_details') or {}).get('content') or '')
+                if isinstance(c, str) and NUDGE_MARKER in c:
+                    return True
+            return False
+
+        def already_nudged_for_current_failure(detail):
+            """Idempotency check, scoped to the CURRENT failure.
+
+            A conversation is considered 'already nudged' only if a nudge marker
+            exists AFTER the most recent REAL user message (one that is NOT a
+            nudge itself). That way a conversation that was nudged weeks ago,
+            recovered, ran successfully, and then later failed on a NEW user
+            question becomes eligible for a fresh nudge.
+            """
+            groups = detail.get('message_groups') or []
+            participants = detail.get('participants') or []
+            user_pids = {p.get('id') for p in participants if p.get('entity_name') == 'user'}
+
+            sorted_g = sorted(
+                groups,
+                key=lambda g: parse_ts(g.get('created_at', '')) or datetime.min.replace(tzinfo=timezone.utc),
+            )
+
+            # Find the chronologically-latest REAL user message: user-pid AND not a nudge.
+            last_real_user_idx = -1
+            for i, g in enumerate(sorted_g):
+                if g.get('author_participant_id') in user_pids and not _is_nudge_group(g):
+                    last_real_user_idx = i
+
+            # No real user message anywhere → fall back to global "any marker"
+            # check (rare; safest default to avoid runaway).
+            if last_real_user_idx < 0:
+                return any(_is_nudge_group(g) for g in sorted_g)
+
+            # Did we already nudge AFTER the last real user message?
+            return any(_is_nudge_group(g) for g in sorted_g[last_real_user_idx + 1:])
+
+        nudge_plan = []
+        nudge_skipped = []  # convs we'd nudge but for the idempotency block
+        for r in rows:
+            if r.get('status') != 'errored':
+                continue
+            cid = r['id']
+            detail = full_details.get(cid)
+            if not detail:
+                r['nudge_skipped_reason'] = 'no full detail available'
+                continue
+
+            # Idempotency, scoped to current failure: skip only if we already
+            # nudged AFTER the user's most recent real question. New failures
+            # (after a successful retry) become eligible again.
+            if already_nudged_for_current_failure(detail):
+                nudge_skipped.append({
+                    'conversation_id': cid,
+                    'name': r.get('name'),
+                    'reason': 'already nudged for current failure — needs human attention',
+                })
+                r['nudge_skipped_reason'] = 'already_nudged_for_current_failure'
+                continue
+
+            agent_pid = find_agent_participant_id(detail)
+            raw_user_msg = extract_last_user_message(detail)
+            conv_uuid = detail.get('uuid')
+            if not agent_pid or not raw_user_msg or not conv_uuid:
+                r['nudge_skipped_reason'] = (
+                    f'missing fields agent_pid={agent_pid} '
+                    f'user_q={"yes" if raw_user_msg else "no"} '
+                    f'uuid={"yes" if conv_uuid else "no"}'
+                )
+                continue
+
+            latest_question, reply_instr, history_lines = parse_teams_user_message(raw_user_msg)
+            reason = r.get('failure_reason') or 'unknown'
+
+            history_block = ''
+            if history_lines:
+                lines_md = []
+                for h in history_lines[-12:]:
+                    lines_md.append(f"- `{h['ts']}` **{h['who']}**: {h['text']}")
+                history_block = (
+                    "\n\n**Recent conversation history (for context, useful after compaction):**\n"
+                    + "\n".join(lines_md)
+                )
+
+            # Preserve the Teams routing block verbatim — agent uses it for ReplyTeamsMessage
+            reply_instr_block = ''
+            if reply_instr:
+                reply_instr_block = (
+                    "\n\n**Teams routing (use these instructions for `ReplyTeamsMessage`):**\n"
+                    f"<ReplyInstructions>{reply_instr}</ReplyInstructions>"
+                )
+
+            nudge_text = (
+                f"{NUDGE_MARKER}\n\n"
+                f"Your previous reply in this conversation failed: `{reason}`.\n\n"
+                "**Please do the following, in order:**\n"
+                "1. Use `ReplyTeamsMessage` (with the Teams routing instructions below) to send a "
+                "brief apology to the user in Teams, acknowledging the technical failure of the "
+                "previous turn. Do NOT reveal internal details — say something like: \"Sorry, my "
+                "previous reply was broken due to a technical issue. Let me try again.\"\n"
+                "2. Then process the user's most recent question (below) and send the actual answer "
+                "to the same Teams conversation.\n\n"
+                "---\n\n"
+                f"**User's latest question (the one you must answer):**\n\n{latest_question or '(empty)'}"
+                + reply_instr_block
+                + history_block
+            )
+
+            nudge_plan.append({
+                'conversation_id': cid,
+                'conversation_uuid': conv_uuid,
+                'name': r.get('name'),
+                'agent_participant_id': agent_pid,
+                'failure_reason': reason,
+                'latest_question': latest_question,
+                'has_reply_instructions': bool(reply_instr),
+                'history_line_count': len(history_lines),
+                'nudge_text': nudge_text,
+            })
+
+        # ───── Execute (or dry-run) the nudges ─────
+        nudge_results = []
+        if APPLY and nudge_plan:
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                send_headers = dict(headers)
+                send_headers['Content-Type'] = 'application/json'
+                async def send_one(item):
+                    url = f"{base_url}/api/v2/elitea_core/messages/prompt_lib/{PROJECT_ID}/{item['conversation_uuid']}"
+                    payload = {
+                        'participant_id': item['agent_participant_id'],
+                        'user_input': item['nudge_text'],
+                        'await_task_timeout': -1,
+                        'return_task_id': True,
+                    }
+                    try:
+                        resp = await client.post(url, headers=send_headers, json=payload)
+                        ok = resp.status_code < 400
+                        body = None
+                        try: body = resp.json()
+                        except Exception: body = {'raw': resp.text[:200]}
+                        return {
+                            'conversation_id': item['conversation_id'],
+                            'http_status': resp.status_code,
+                            'ok': ok,
+                            'task_id': (body or {}).get('task_id'),
+                            'response_excerpt': str(body)[:200],
+                        }
+                    except Exception as e:
+                        return {
+                            'conversation_id': item['conversation_id'],
+                            'http_status': None,
+                            'ok': False,
+                            'error': str(e)[:200],
+                        }
+                nudge_results = await asyncio.gather(*(send_one(item) for item in nudge_plan))
+
+        passes_summary['nudges_planned'] = len(nudge_plan)
+        passes_summary['nudges_skipped_already_nudged'] = len(nudge_skipped)
+        passes_summary['nudges_applied'] = len(nudge_results)
+        passes_summary['mode'] = 'APPLY' if APPLY else 'DRY-RUN'
+
+        # Sort: errored > pending > active > completed > empty, newest first within each
+        order = {'errored': 0, 'pending': 1, 'active': 2, 'completed': 3, 'empty': 4}
+        rows.sort(key=lambda r: (
+            order.get(r.get('status'), 9),
+            -(int((parse_ts(r.get('updated_at') or '') or datetime.min.replace(tzinfo=timezone.utc)).timestamp())),
+        ))
+
+        counts = {'errored': 0, 'pending': 0, 'active': 0, 'completed': 0, 'empty': 0}
+        for r in rows:
+            s = r.get('status', 'empty')
+            counts[s] = counts.get(s, 0) + 1
+
+        # Build Markdown report
+        lines = []
+        lines.append(f"# Conversation Health Report — project {PROJECT_ID} (mode: {passes_summary['mode']})")
+        lines.append('')
+        lines.append(
+            f"**Window:** last {DAYS_BACK} days  |  "
+            f"**Total:** {len(rows)}  |  "
+            f"**Errored:** {counts['errored']}  |  "
+            f"**Pending:** {counts['pending']}  |  "
+            f"**Active:** {counts.get('active', 0)}  |  "
+            f"**Completed:** {counts['completed']}  |  "
+            f"**Empty:** {counts['empty']}"
+        )
+        lines.append('')
+        lines.append(
+            f"*Fetches: pass2(last-2-msgs)={passes_summary['pass2_msg_fetches']}, "
+            f"pass3(full-detail-only-for-non-completed)={passes_summary['pass3_full_detail_fetches']}*"
+        )
+        lines.append('')
+        if errors:
+            lines.append('> Fetch warnings: ' + '; '.join(errors))
+            lines.append('')
+        lines.append(
+            '| id | name | updated_at | agent_id | groups | tool_err | top_failing_tool | '
+            'ctx_press | status | failure | failure_reason |'
+        )
+        lines.append('|---|---|---|---|---|---|---|---|---|---|---|')
+
+        def cell(s):
+            if s is None:
+                return ''
+            s = str(s).replace('|', '\\|').replace('\n', ' ')
+            return s[:80]
+
+        # Dedupe by id (list endpoint occasionally returns dups)
+        seen_ids = set()
+        for r in rows:
+            if r['id'] in seen_ids:
+                continue
+            seen_ids.add(r['id'])
+            te = r.get('tool_error_count') or 0
+            te_disp = f'**{te}**' if te > 5 else (str(te) if te else '')
+            ctx_p = r.get('context_pressure')
+            ctx_disp = ''
+            if ctx_p is not None:
+                ctx_disp = f'**{ctx_p:.2f}**' if ctx_p >= 0.85 else f'{ctx_p:.2f}'
+            lines.append(
+                f"| {r['id']} | {cell(r.get('name'))} | {cell(r.get('updated_at'))} | "
+                f"{cell(r.get('agent_id'))} | {cell(r.get('message_groups_count'))} | "
+                f"{te_disp} | {cell(r.get('top_failing_tool'))} | {ctx_disp} | "
+                f"{r.get('status')} | {r.get('failure')} | {cell(r.get('failure_reason'))} |"
+            )
+        # Append nudge plan / results
+        lines.append('')
+        lines.append('---')
+        lines.append('')
+        lines.append(f"## Nudge plan — mode: **{passes_summary['mode']}**")
+        lines.append('')
+        if nudge_skipped:
+            lines.append(
+                f"**Skipped (already nudged previously, need human attention):** {len(nudge_skipped)}"
+            )
+            for s in nudge_skipped:
+                lines.append(f"- conv {s['conversation_id']} — {s['name']}")
+            lines.append('')
+
+        if not nudge_plan:
+            lines.append('No new errored Teams conversations to nudge.')
+        else:
+            lines.append(f"**Planned nudges:** {len(nudge_plan)}")
+            if APPLY:
+                lines.append(f"**Applied:** {len(nudge_results)}")
+            lines.append('')
+            for i, item in enumerate(nudge_plan, 1):
+                lines.append(f"### {i}. Conversation {item['conversation_id']} — {item['name']}")
+                lines.append(f"- agent_participant_id: `{item['agent_participant_id']}`")
+                lines.append(f"- failure_reason: `{item['failure_reason']}`")
+                lines.append(f"- latest_question: {(item['latest_question'] or '(empty)')[:200]}")
+                lines.append(f"- has_reply_instructions: {item['has_reply_instructions']}")
+                lines.append(f"- history_lines_included: {item['history_line_count']}")
+                lines.append('')
+                lines.append('<details><summary>Nudge body to POST</summary>')
+                lines.append('')
+                lines.append('```')
+                lines.append(item['nudge_text'])
+                lines.append('```')
+                lines.append('</details>')
+                lines.append('')
+                if APPLY:
+                    res = next((r for r in nudge_results if r['conversation_id'] == item['conversation_id']), None)
+                    if res:
+                        ok_tag = '✅' if res.get('ok') else '❌'
+                        lines.append(
+                            f"**Send result:** {ok_tag} HTTP {res.get('http_status')} "
+                            f"task_id=`{res.get('task_id')}` "
+                            f"{res.get('error', '')}"
+                        )
+                lines.append('')
+
+        if not APPLY:
+            lines.append('---')
+            lines.append('> To actually send these nudges, include the word `apply` in your message '
+                         '(e.g. `7 days apply`). Otherwise this is dry-run only.')
+
+        report_md = '\n'.join(lines)
+
+        # Deduplicate before aggregating
+        deduped = []
+        _seen = set()
+        for r in rows:
+            if r['id'] not in _seen:
+                _seen.add(r['id'])
+                deduped.append(r)
+
+        # Per-agent rollup: which agent has the highest error rate?
+        per_agent = {}
+        for r in deduped:
+            aid = r.get('agent_id')
+            if aid is None:
+                continue
+            s = per_agent.setdefault(aid, {'total': 0, 'errored': 0, 'tool_err_sum': 0})
+            s['total'] += 1
+            if r.get('status') == 'errored':
+                s['errored'] += 1
+            s['tool_err_sum'] += r.get('tool_error_count') or 0
+
+        per_agent_rollup = sorted(
+            (
+                {
+                    'agent_id': aid,
+                    'total': s['total'],
+                    'errored': s['errored'],
+                    'error_rate': round(s['errored'] / s['total'], 2) if s['total'] else 0,
+                    'tool_err_sum': s['tool_err_sum'],
+                }
+                for aid, s in per_agent.items()
+            ),
+            key=lambda x: (-x['error_rate'], -x['tool_err_sum']),
+        )
+
+        # Top failing tools across the window
+        tool_err_global = {}
+        for r in deduped:
+            tft = r.get('top_failing_tool')
+            if not tft:
+                continue
+            try:
+                name, cnt = tft.rsplit('×', 1)
+                tool_err_global[name] = tool_err_global.get(name, 0) + int(cnt)
+            except Exception:
+                pass
+        top_failing_tools_global = sorted(
+            tool_err_global.items(), key=lambda kv: -kv[1]
+        )[:5]
+
+        # Context-pressure outliers (≥ 85% full)
+        ctx_pressure_outliers = [
+            {
+                'id': r['id'],
+                'name': r.get('name'),
+                'ctx_pressure': r.get('context_pressure'),
+                'context_tokens': r.get('context_tokens'),
+                'summaries': r.get('summaries_generated'),
+            }
+            for r in deduped
+            if r.get('context_pressure') is not None and r.get('context_pressure') >= 0.85
+        ][:10]
+
+        summary = {
+            'project_id': PROJECT_ID,
+            'window_days': DAYS_BACK,
+            'fetched_at_utc': datetime.now(timezone.utc).isoformat(),
+            'counts': counts,
+            'per_agent_rollup': per_agent_rollup,
+            'top_failing_tools': [
+                {'tool': name, 'errors_in_window': cnt}
+                for name, cnt in top_failing_tools_global
+            ],
+            'context_pressure_outliers': ctx_pressure_outliers,
+            'errored_samples': [
+                {
+                    'id': r['id'],
+                    'name': r.get('name'),
+                    'agent_id': r.get('agent_id'),
+                    'failure_reason': r.get('failure_reason'),
+                    'evidence': r.get('evidence'),
+                    'tool_error_count': r.get('tool_error_count'),
+                    'top_failing_tool': r.get('top_failing_tool'),
+                    'context_pressure': r.get('context_pressure'),
+                }
+                for r in deduped if r.get('status') == 'errored'
+            ][:15],
+            'pending_samples': [
+                {'id': r['id'], 'name': r.get('name'), 'created_at': r.get('created_at')}
+                for r in deduped if r.get('status') == 'pending'
+            ][:10],
+        }
+        {'report_md': report_md}
+    input: []
+    output: [report_md]
+    structured_output: true
+    transition: Display
+
+  - id: Display
+    type: printer
+    input_mapping:
+      printer:
+        type: variable
+        value: report_md
+    transition: END

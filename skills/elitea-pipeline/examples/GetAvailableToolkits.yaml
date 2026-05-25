@@ -1,0 +1,88 @@
+state:
+  available_toolkits:
+    type: str
+    value: ''
+  input:
+    type: str
+  messages:
+    type: list
+  status:
+    type: str
+    value: ''
+entry_point: list_filtered_tools
+nodes:
+  - id: list_filtered_tools
+    type: code
+    code:
+      type: fixed
+      value: |-
+        # Retrieve secret value
+        auth_token = alita_client.unsecret('auth_token')
+        url = "https://next.elitea.ai/api/v2/elitea_core/toolkits/prompt_lib/630"
+
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            headers = {"Authorization": f"Bearer {auth_token}"}
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+        filtered_tools = []
+
+        for tk_id, tk_data in data.items():
+            if not isinstance(tk_data, dict): continue
+            
+            metadata = tk_data.get("metadata", {})
+            categories = metadata.get("categories", [])
+            is_hidden = metadata.get("hidden", False)
+            
+            # Filter logic: skip hidden and internal tools
+            if is_hidden or "internal_tool" in categories:
+                continue
+                
+            label = metadata.get("label", tk_id)
+            tools_data = tk_data.get("properties", {}).get("selected_tools", {}).get("args_schemas", {})
+            
+            tool_names = list(tools_data.keys())
+            
+            filtered_tools.append({
+                    "toolkit_id": tk_id,
+                    "toolkit_label": label,
+                    "tools": tool_names
+                })
+
+        # The final expression is returned as the node's output
+        {"status": "success", "available_toolkits": filtered_tools}
+    output:
+      - status
+      - available_toolkits
+    structured_output: true
+    transition: StateModifier 1
+  - id: print_toolkits
+    type: printer
+    interrupt_after: true
+    interrupt_before: false
+    final_message: |2-
+
+            *Please select a toolkit_id and tool_name to see more details.*
+    input:
+      available_toolkits: '{{available_toolkits}}'
+    input_mapping:
+      printer:
+        type: variable
+        value: available_toolkits
+    transition: END
+  - id: StateModifier 1
+    type: state_modifier
+    input:
+      - available_toolkits
+    output:
+      - available_toolkits
+    template: |2-
+        {% for tk in available_toolkits %}
+        - **{{tk.toolkit_label}}** (ID: `{{tk.toolkit_id}}`)
+          Tools: {{ tk.tools | join(', ') }}
+        {% endfor %}
+    transition: print_toolkits
+    variables_to_clean: []

@@ -1,0 +1,893 @@
+openapi: 3.1.0
+info:
+  title: Elitea Core API
+  version: "2.0"
+  description: >
+    REST API for the Elitea platform (https://next.elitea.ai).
+
+    Path structure: /elitea_core/{entity}/prompt_lib/{project_id}/[{id}]
+    Project ID 630 is hardcoded — update every path if your project differs.
+
+servers:
+  - url: https://next.elitea.ai/api/v2
+    description: Production
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    PaginatedEnvelope:
+      type: object
+      required: [total, rows]
+      properties:
+        total:
+          type: integer
+        rows:
+          type: array
+          items: {}
+
+    ParticipantBase:
+      type: object
+      properties:
+        id:
+          type: integer
+        entity_name:
+          type: string
+          enum: [user, llm, datasource, application, toolkit, dummy]
+        entity_meta:
+          type: object
+        entity_settings:
+          type: object
+        meta:
+          type: object
+
+    ParticipantInput:
+      type: object
+      required: [entity_name, entity_meta]
+      properties:
+        entity_name:
+          type: string
+          enum: [user, llm, datasource, application, toolkit, dummy]
+        entity_meta:
+          type: object
+        entity_settings:
+          type: object
+          default: {}
+
+    MessageItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        uuid:
+          type: string
+          format: uuid
+        order_index:
+          type: integer
+        item_type:
+          type: string
+          enum: [text_message, canvas_message, attachment_message]
+        item_details:
+          type: object
+          description: >
+            text_message → {content}; canvas_message → {content, language, title};
+            attachment_message → {filepath, file_size}
+        meta:
+          type: object
+
+    MessageGroup:
+      type: object
+      properties:
+        id:
+          type: integer
+        uuid:
+          type: string
+          format: uuid
+        author_participant_id:
+          type: integer
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        sent_to_id:
+          type: integer
+          nullable: true
+        sent_to:
+          type: object
+          nullable: true
+          properties:
+            id:
+              type: integer
+            entity_name:
+              type: string
+              enum: [user, llm, datasource, application, toolkit, dummy]
+            entity_meta:
+              type: object
+            entity_settings:
+              type: object
+            meta:
+              type: object
+        reply_to_id:
+          type: integer
+          nullable: true
+        is_streaming:
+          type: boolean
+          default: false
+        task_id:
+          type: string
+          nullable: true
+        meta:
+          type: object
+        message_items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageItem'
+
+    ConversationRow:
+      type: object
+      properties:
+        id:
+          type: integer
+        uuid:
+          type: string
+          format: uuid
+        name:
+          type: string
+        is_private:
+          type: boolean
+        author_id:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        meta:
+          type: object
+        source:
+          type: string
+        instructions:
+          type: string
+          nullable: true
+        attachment_participant_id:
+          type: integer
+          nullable: true
+        participants_count:
+          type: integer
+        message_groups_count:
+          type: integer
+        users_count:
+          type: integer
+        duration:
+          type: number
+          nullable: true
+
+    ConversationDetail:
+      allOf:
+        - $ref: '#/components/schemas/ConversationRow'
+        - type: object
+          properties:
+            participants:
+              type: array
+              items:
+                $ref: '#/components/schemas/ParticipantBase'
+            message_groups:
+              type: array
+              description: Usually empty — use GET /messages to paginate.
+              items:
+                $ref: '#/components/schemas/MessageGroup'
+
+    ConversationCreateBody:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 3
+        is_private:
+          type: boolean
+          default: true
+        participants:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParticipantInput'
+          default: []
+        source:
+          type: string
+          default: elitea
+          description: '"elitea" for API/flow-created; "alita" for UI-created'
+        meta:
+          type: object
+          default: {}
+        instructions:
+          type: string
+          default: ""
+
+    ConversationUpdateBody:
+      type: object
+      properties:
+        name:
+          type: string
+        instructions:
+          type: string
+          nullable: true
+        is_private:
+          type: boolean
+        folder_id:
+          type: integer
+          nullable: true
+        attachment_participant_id:
+          type: integer
+          nullable: true
+        is_hidden:
+          type: boolean
+        meta:
+          type: object
+
+    SendMessageBody:
+      type: object
+      properties:
+        participant_id:
+          type: integer
+          nullable: true
+          description: Target participant. Null only when using llm_settings for direct LLM predict.
+        user_input:
+          type: string
+        tool_call_input:
+          type: object
+          nullable: true
+          properties:
+            tool_name:
+              type: string
+            tool_args:
+              type: object
+        await_task_timeout:
+          type: integer
+          default: 30
+          minimum: -1
+          maximum: 300
+          description: Seconds to wait; -1 = fire-and-forget
+        return_task_id:
+          type: boolean
+          default: false
+        attachments_info:
+          type: array
+          default: []
+          items:
+            type: object
+            required: [filepath]
+            properties:
+              filepath:
+                type: string
+              file_size:
+                type: integer
+                default: 0
+        llm_settings:
+          type: object
+          nullable: true
+          properties:
+            model_name:
+              type: string
+            temperature:
+              type: number
+            max_tokens:
+              type: integer
+
+    SendMessageResponse:
+      type: object
+      properties:
+        message_groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageGroup'
+        task_id:
+          type: string
+          nullable: true
+
+paths:
+  # ── Conversations ─────────────────────────────────────────────────────────
+  # URL: /api/v2/elitea_core/conversations/prompt_lib/630/
+
+  /elitea_core/conversations/prompt_lib/630/:
+    get:
+      operationId: getEliteaCoreConversations
+      summary: List conversations
+      description: >
+        Paginated list of conversations. No date-range filter — sort by
+        created_at or updated_at to approximate recency filtering.
+        Use entity_name=application + entity_meta_id={agent_id} to find all
+        conversations that used a specific agent.
+      tags: [Conversations]
+      parameters:
+        - name: query
+          in: query
+          schema:
+            type: string
+          description: Substring search on conversation name (case-insensitive)
+        - name: source
+          in: query
+          schema:
+            type: string
+          description: >
+            Comma-separated source filter. "elitea" for API/flow-created;
+            "alita" for UI-created. Omit to get all sources.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: sort_by
+          in: query
+          schema:
+            type: string
+            default: created_at
+            enum: [created_at, updated_at, name]
+        - name: sort_order
+          in: query
+          schema:
+            type: string
+            default: desc
+            enum: [asc, desc]
+          description: desc = newest first
+        - name: entity_name
+          in: query
+          schema:
+            type: string
+          description: Filter by participant entity type (e.g. "application")
+        - name: entity_meta_id
+          in: query
+          schema:
+            type: integer
+          description: Filter by the entity's ID (e.g. specific agent ID)
+        - name: entity_meta_project_id
+          in: query
+          schema:
+            type: integer
+          description: Filter by the entity's source project ID
+      responses:
+        '200':
+          description: Paginated list of conversations
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginatedEnvelope'
+                  - type: object
+                    properties:
+                      rows:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ConversationRow'
+              example:
+                total: 42
+                rows:
+                  - id: 300
+                    uuid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                    name: "Teams:JohnDoe"
+                    is_private: false
+                    author_id: 5
+                    created_at: "2025-01-15T10:30:00Z"
+                    updated_at: "2025-01-15T11:00:00Z"
+                    source: elitea
+                    participants_count: 2
+                    message_groups_count: 12
+                    users_count: 1
+                    duration: 1800.5
+
+    post:
+      operationId: postEliteaCoreConversations
+      summary: Create a new conversation
+      tags: [Conversations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConversationCreateBody'
+            example:
+              name: "Teams:JohnDoe"
+              is_private: false
+              participants: []
+              source: elitea
+      responses:
+        '201':
+          description: Created conversation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationDetail'
+
+  # URL: /api/v2/elitea_core/conversation/prompt_lib/630/{id}
+  # Note: singular "conversation" vs plural above
+
+  /elitea_core/conversation/prompt_lib/630/{conversation_id}:
+    get:
+      operationId: getEliteaCoreConversation
+      summary: Get conversation details (participants, metadata, message count)
+      description: >
+        Returns metadata and participants. message_groups is typically empty —
+        call getEliteaCoreMessages to retrieve messages with limit/offset.
+      tags: [Conversations]
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Conversation integer ID
+      responses:
+        '200':
+          description: Conversation detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationDetail'
+              example:
+                id: 300
+                uuid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                name: "Teams:JohnDoe"
+                source: elitea
+                message_groups_count: 12
+                message_groups: []
+                participants:
+                  - id: 1
+                    entity_name: user
+                    entity_meta: {id: 5}
+                  - id: 2
+                    entity_name: application
+                    entity_meta: {id: 62, project_id: 630}
+                    entity_settings: {version_id: 93}
+
+    put:
+      operationId: putEliteaCoreConversation
+      summary: Update conversation metadata
+      tags: [Conversations]
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Conversation integer ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConversationUpdateBody'
+      responses:
+        '200':
+          description: Updated conversation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationDetail'
+
+    delete:
+      operationId: deleteEliteaCoreConversation
+      summary: Delete a conversation
+      tags: [Conversations]
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Conversation integer ID
+      responses:
+        '204':
+          description: Deleted
+
+  # ── Messages ──────────────────────────────────────────────────────────────
+  # GET uses integer conversation_id; POST uses UUID string
+
+  /elitea_core/messages/prompt_lib/630/{conversation_id}:
+    get:
+      operationId: getEliteaCoreMessages
+      summary: Get messages from a conversation
+      description: >
+        Paginated message groups with full message_items content.
+        Use limit=10 + sort_order=desc to get the last 10 messages (newest first).
+        Use sort_order=asc for chronological / reading order.
+      tags: [Messages]
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Conversation integer ID
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+          description: Max message groups to return
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: sort_by
+          in: query
+          schema:
+            type: string
+            default: created_at
+            enum: [created_at]
+        - name: sort_order
+          in: query
+          schema:
+            type: string
+            default: desc
+            enum: [asc, desc]
+          description: desc = newest first; asc = oldest first (reading order)
+        - name: query
+          in: query
+          schema:
+            type: string
+          description: Full-text search within message content
+      responses:
+        '200':
+          description: Paginated message groups
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginatedEnvelope'
+                  - type: object
+                    properties:
+                      rows:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/MessageGroup'
+
+  /elitea_core/messages/prompt_lib/630/{conversation_uuid}:
+    post:
+      operationId: postEliteaCoreMessages
+      summary: Send a message to a conversation
+      description: >
+        Sends a user message to a participant (agent or LLM).
+        IMPORTANT: this path takes the conversation UUID string, not the integer ID.
+      tags: [Messages]
+      parameters:
+        - name: conversation_uuid
+          in: path
+          required: true
+          schema:
+            type: string
+          description: >
+            Conversation UUID string — NOT the integer ID.
+            Get it from the uuid field returned by the conversations endpoints.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageBody'
+            examples:
+              send_to_agent:
+                summary: Send to agent, wait up to 60s
+                value:
+                  participant_id: 15
+                  user_input: "Summarize the latest report"
+                  await_task_timeout: 60
+              fire_and_forget:
+                summary: Fire-and-forget, get task_id
+                value:
+                  participant_id: 15
+                  user_input: "Generate a full report"
+                  await_task_timeout: -1
+                  return_task_id: true
+              with_attachment:
+                summary: Send with uploaded file
+                value:
+                  participant_id: 15
+                  user_input: "Analyze the attached document"
+                  await_task_timeout: 60
+                  attachments_info:
+                    - filepath: "/my-bucket/report.pdf"
+                      file_size: 204800
+      responses:
+        '201':
+          description: Synchronous — AI response ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendMessageResponse'
+        '202':
+          description: Async — AI message still streaming (is_streaming=true)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendMessageResponse'
+        '200':
+          description: When return_task_id=true — task_id only
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+
+  # ── Participants ──────────────────────────────────────────────────────────
+
+  /elitea_core/participants/prompt_lib/630/{conversation_id}:
+    post:
+      operationId: postEliteaCoreParticipants
+      summary: Add participants to a conversation
+      tags: [Participants]
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Conversation integer ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/ParticipantInput'
+            examples:
+              add_agent:
+                summary: Add an agent participant
+                value:
+                  - entity_name: application
+                    entity_meta:
+                      id: 62
+                      project_id: 630
+                    entity_settings:
+                      version_id: 93
+                      agent_type: openai
+              add_llm:
+                summary: Add a raw LLM participant
+                value:
+                  - entity_name: llm
+                    entity_meta:
+                      model_name: gpt-4o
+      responses:
+        '200':
+          description: Created participant objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ParticipantBase'
+
+  /elitea_core/participants/prompt_lib/630/{conversation_id}/{participant_id}:
+    delete:
+      operationId: deleteEliteaCoreParticipant
+      summary: Remove a participant from a conversation
+      tags: [Participants]
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Conversation integer ID
+        - name: participant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Participant integer ID
+      responses:
+        '200':
+          description: Removed
+        '204':
+          description: Removed (no content)
+        '400':
+          description: Not found or cannot be removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+
+    patch:
+      operationId: patchEliteaCoreEntitySettings
+      summary: Configure participant LLM / agent settings
+      description: >
+        Update model, temperature, chat history strategy, or agent version.
+        chat_history_template accepts "all", "context_managed", or an integer
+        (last N message groups sent to the model).
+      tags: [Participants]
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Conversation integer ID
+        - name: participant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Participant integer ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                llm_settings:
+                  type: object
+                  properties:
+                    model_name:
+                      type: string
+                    model_project_id:
+                      type: integer
+                    temperature:
+                      type: number
+                      minimum: 0.0
+                      maximum: 2.0
+                    max_tokens:
+                      type: integer
+                    reasoning_effort:
+                      type: string
+                      enum: [low, medium, high]
+                    chat_history_template:
+                      type: string
+                      default: all
+                      description: >
+                        Controls how much history the model sees.
+                        "all" = full history (default);
+                        "context_managed" = auto-summarised;
+                        pass a number as a string (e.g. "10") to send only the last N message groups.
+                version_id:
+                  type: integer
+                  description: Switch agent version (application participants)
+                variables:
+                  type: array
+                  default: []
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      value:
+                        type: string
+            examples:
+              set_model:
+                summary: Change model and limit history to 10 messages
+                value:
+                  llm_settings:
+                    model_name: gpt-4o
+                    temperature: 0.5
+                    chat_history_template: 10
+              switch_version:
+                summary: Switch agent version
+                value:
+                  version_id: 200
+                  variables:
+                    - name: tone
+                      value: formal
+      responses:
+        '200':
+          description: Updated participant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParticipantBase'
+
+  # ── Attachments ───────────────────────────────────────────────────────────
+
+  /elitea_core/attachments/prompt_lib/630/{conversation_id}:
+    post:
+      operationId: postEliteaCoreAttachments
+      summary: Upload a file to a conversation
+      description: >
+        Returns a filepath string to use in attachments_info when sending a message.
+      tags: [Attachments]
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Conversation integer ID
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                overwrite_attachments:
+                  type: integer
+                  enum: [0, 1]
+                  default: 0
+                file_id:
+                  type: string
+                chunk_index:
+                  type: integer
+                total_chunks:
+                  type: integer
+                file_name:
+                  type: string
+      responses:
+        '200':
+          description: Uploaded file info
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    filepath:
+                      type: string
+                    file_size:
+                      type: integer
+
+  /elitea_core/attachment_storage/prompt_lib/630/{conversation_id}:
+    put:
+      operationId: putEliteaCoreAttachmentStorage
+      summary: Set or remove the artifact toolkit on a conversation
+      tags: [Attachments]
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Conversation integer ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [toolkit_id]
+              properties:
+                toolkit_id:
+                  type: integer
+                  nullable: true
+                  description: Toolkit ID to attach, or null to detach
+      responses:
+        '200':
+          description: Toolkit attached
+        '204':
+          description: Toolkit detached
+
+tags:
+  - name: Conversations
+    description: List, create, retrieve, and update conversations
+  - name: Messages
+    description: Read messages and send new ones
+  - name: Participants
+    description: Manage conversation participants (agents, users, LLMs)
+  - name: Attachments
+    description: Upload files and configure artifact storage
