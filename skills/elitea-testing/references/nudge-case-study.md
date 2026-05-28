@@ -196,6 +196,17 @@ User E's conv was streaming for 81s when scanned and was classified as "hung". A
 
 ## 5. Schedule — GitHub Actions every 15 min
 
+> **2.0.3+ alternative — native pipeline cron.** As of ELITEA 2.0.3 the pipeline itself can declare a `scheduled` trigger at its entry-point node, and ELITEA fires it directly with no external scheduler. For the `ConversationHealthAnalyzer` pipeline specifically (no Printer, no HITL, no interrupts), this is the cleaner choice — fewer moving parts, no GH-Actions billing risk, no PAT-secret rotation.
+>
+> Keep the GH-Actions path described in this section when:
+> - The pipeline contains any interactive node (Printer / HITL / interrupt) — cron + interactive is forbidden, you MUST stick with `chat` trigger and external scheduler
+> - You need pre/post logic outside the pipeline (e.g. fan-out to multiple projects via a matrix, persistence of artifacts to GH, alerting via PRs/issues)
+> - The native cron path hasn't been verified end-to-end for your scenario yet — keep the GH-Actions cron as the durable fallback and switch over once both have been observed to behave the same way over a week
+>
+> See `elitea-pipeline/references/workflows.md` § "Pipeline entry-point triggers" for the trigger types and constraints.
+
+### Classic GH-Actions cron (the pattern that's been running all year)
+
 `<your-ops-repo>/.github/workflows/nudge-failed-conversations.yaml`:
 
 ```yaml
@@ -259,6 +270,13 @@ Over the first 30 days post-deploy:
 4. **Preserve provider-specific routing data verbatim.** `<ReplyInstructions>` looked like noise but contained the Teams routing the agent needed. Don't strip what you don't fully understand.
 5. **Active ≠ hung.** Time-since-streaming-started is a critical signal. Always require an age threshold for "stuck" classifications.
 6. **One canonical pipeline + parameterized inputs > N copies.** The `project=NNN` parser meant we ship one YAML to git and deploy it identically to multiple ELITEA projects.
+7. **`finish_reason: stop` ≠ delivered.** ReplyTeamsMessage wraps a Power Automate workflow that POSTs to Microsoft Graph. The tool returns `finish_reason: stop` whenever Power Automate replies — even when Graph rejected the message (e.g. body uses HTML tags Teams forbids: `<h1>-<h6>`, complex code blocks, `<table>`). Truth lives in `tool_output`: `"ok":true / "Teams reply was sent"` (delivered) vs `Tool execution error! ... Power Automate workflow ... error` (not delivered). The CHA pipeline now inspects `tool_output` and classifies multi-call delivery with a **last-call rule**: if the LAST ReplyTeamsMessage call succeeded, the user has the agent's final intent → `delivered_last_ok` (completed). If the LAST failed → `last_failed` (re-nudge). Earlier failures in the middle don't matter if the final retry landed.
+8. **The list endpoint's `updated_at` lies.** When the underlying predict crashes pre-task-id (e.g. ELITEA 0.416's `validate_and_resolve_llm_settings` regression), the conversation gets a new hung message group but its list-level `updated_at` doesn't advance. A 1-day window then silently misses the conv. Fix: Pass 1 always uses a wider buffer (`max(DAYS_BACK, 7)` days), then Pass 2 re-filters convs by their **actual last message-group timestamp**. The report tells you how many got dropped: `dropped=N convs whose actual last message was older than effective cutoff`.
+9. **Corrupted-response detection.** When the agent's predict path hits an auth/redirect failure, the response sometimes contains the ELITEA UI's HTML landing page (`Error: <!DOCTYPE html>...alita_ui_config...sourceMappingURL=...`) instead of an assistant reply. Without a specific detector this slips through as `completed` because it has text content and no streaming flag. Add a regex matching `Error:\s*<!DOCTYPE | alita_ui_config | sourceMappingURL=` to the classifier.
+10. **Nudges look like user messages.** When the cron POSTs a nudge to `/messages/`, ELITEA records it with the operator's user-participant id (not 6, not 19 — usually a separate pid like 77). Any helper that finds "the latest user message" must filter out nudge groups (`_is_nudge_group(g)`) or it will return the previous nudge's marker text as the "latest user question" — and the next nudge will ask the agent to "answer" our own prior nudge. Both `extract_last_user_message` and `already_nudged_for_current_failure` need this filter.
+11. **ChatHistory blocks are multi-line.** The Teams integration embeds a `<ChatHistory>...</ChatHistory>` block in each user message. Each turn starts with a header line `TS | speaker | first-line-of-text` and may continue across many physical lines until the next header. Parsing line-by-line with `re.match(header_pattern, line)` only captures HEADER lines and drops the continuation. The agent then sees nudge context that's just "first line of each turn" — long agent replies with tables/code snippets get truncated to a one-liner. Accumulate continuation lines into the current turn's text until the next header.
+12. **Pattern E (generic catch-all for Teams convs).** Beyond specific known failure modes (hung, explicit error, corrupted), the most useful single rule is: *for any Teams conv, the LAST assistant turn MUST have a successful ReplyTeamsMessage delivery, or the user got nothing*. Subsumes ghost-teams-reply (text claims delivered but no tool call), scratchpad-only (reasoning never followed by send), forgot-the-tool, tool-failed. Apply a 15-minute grace period before flagging — fresh responses may still be settling meta.tool_calls writes.
+13. **MAX_NUDGE_ATTEMPTS cap.** When a nudge's response is itself broken (the agent hung again, or returned corrupted HTML), `_nudge_response_is_real` correctly says "not delivered" and we re-nudge. Without a cap this loops forever during prolonged platform outages. Cap at 3 attempts per failure window — beyond that, flag for human review.
 
 ## 8. Where to look next
 

@@ -9,43 +9,43 @@
       "name": "elitea-skills",
       "source": "./",
       "description": "Full ELITEA toolkit — both agents and all four skills in one install.",
-      "version": "0.2.0"
+      "version": "0.3.0"
     },
     {
       "name": "elitea-builder",
       "source": "./agents/elitea-builder",
       "description": "ELITEA Builder agent — designs and deploys ELITEA-native artifacts (agents, pipelines, toolkits, credentials, version links).",
-      "version": "0.2.0"
+      "version": "0.3.0"
     },
     {
       "name": "elitea-integrator",
       "source": "./agents/elitea-integrator",
       "description": "ELITEA Integrator agent — connects external systems to ELITEA via REST/MCP (GH Actions cron, Power Automate, Teams bots, Python/JS clients, webhook handlers).",
-      "version": "0.2.0"
+      "version": "0.3.0"
     },
     {
       "name": "elitea-platform",
       "source": "./skills/elitea-platform",
       "description": "Foundation: REST API conventions (v1/v2), auth, ID rules, secret placeholders, 21 built-in MCP tools, status codes, base URLs. Load first for any ELITEA work.",
-      "version": "0.2.0"
+      "version": "0.3.0"
     },
     {
       "name": "elitea-pipeline",
       "source": "./skills/elitea-pipeline",
       "description": "Pipeline YAML — schema for all 10 modern node types, state management, runtime helpers (elitea_client.auth_token, elitea_state), pattern catalog, real worked examples.",
-      "version": "0.2.0"
+      "version": "0.3.0"
     },
     {
       "name": "elitea-toolkit",
       "source": "./skills/elitea-toolkit",
       "description": "Toolkit types (OpenAPI, MCP, datasource, custom_python, application-as-tool), credentials linkage via {elitea_title, private} refs, real OpenAPI specs.",
-      "version": "0.2.0"
+      "version": "0.3.0"
     },
     {
       "name": "elitea-testing",
       "source": "./skills/elitea-testing",
       "description": "Run, predict, debug, schedule ELITEA artifacts. Includes nudge case study (full BUILD→DEPLOY→TEST→SCHEDULE lifecycle) and update_agent.py script.",
-      "version": "0.2.0"
+      "version": "0.3.0"
     }
   ]
 }

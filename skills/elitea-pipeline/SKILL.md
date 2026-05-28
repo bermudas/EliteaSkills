@@ -21,6 +21,7 @@ A pipeline is an `agent_type: pipeline` ELITEA agent whose `instructions` field 
 | Validation checklist & common debugging steps | `references/workflows.md` |
 | How `alita_client` / `elitea_client` helpers work in code nodes | `references/workflows.md` § "Code Node Special Capabilities" |
 | Real, working pipeline YAML files to learn from | `examples/*.yaml` (see catalog below) |
+| **Entry-point triggers** (chat / scheduled / webhook) + their interactive-node constraint | `references/workflows.md` § "Pipeline entry-point triggers" |
 
 ## Example catalog (`examples/`)
 

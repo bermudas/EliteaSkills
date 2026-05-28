@@ -249,3 +249,15 @@ ELITEA exposes two surfaces:
 > **Rule of thumb:** use MCP tools for reads (cleaner, no auth-host juggling); fall back to direct REST against `next.elitea.ai` (or whichever host your PAT covers — see §1) for any create/update/predict call. The `scripts/build_agent_payload.py` and `scripts/update_version_field.py` helpers exist because of this asymmetry — both pull live state via REST, mutate, and PUT/POST back.
 
 Tangentially: `mcp__elitea-next__getProjectsProject` is mis-described in its schema as "Retrieve a single project" but actually returns **all projects accessible to the caller** when given any valid `project_id` (e.g., your `personal_project_id` from `getAuthUser`). Use that to discover project IDs by name without crawling.
+
+## 13. ELITEA 2.0.3+ changes worth knowing
+
+These shipped with the 2.0.3 release; if you're working on a pre-2.0.3 ELITEA instance some of this won't apply yet.
+
+- **Pipeline entry-point triggers** — pipelines can declare a `chat` (default), `scheduled` (cron), or `webhook` trigger at the entry-point node. **Constraint:** `scheduled` and `webhook` pipelines cannot contain HITL, Printer, or interrupt-requiring nodes. See `elitea-pipeline/references/workflows.md` § "Pipeline entry-point triggers".
+- **Native cron** — once a pipeline has a `scheduled` trigger, ELITEA fires it directly; no need for external GH Actions cron + REST shim. The external shim is still recommended when the pipeline has interactive nodes OR you need pre/post logic. See `elitea-testing/references/nudge-case-study.md` § "Scheduling".
+- **Sub-agents as standard tools + explicit `task` contract** — sub-agents called as tools no longer inherit the parent's chat history implicitly. The parent must pass everything the child needs via the `task` field. Multi-agent pipelines written pre-2.0.3 may behave differently after upgrade — audit and add explicit task context where needed. See `elitea-toolkit/references/toolkit-types.md` § `application`.
+- **Pipeline file attachments as input** — uploaded files are stored in the artifact bucket, and the pipeline receives the file path as an input field. Code nodes retrieve via `alita_client.artifact('bucket').get(path)`.
+- **Scoped index creation** — datasource indexers can target a folder within a bucket, not just the whole bucket. Lets one bucket back multiple datasources.
+- **ADO project at toolkit level** — for Azure DevOps toolkits, the project is now selected in the toolkit settings (not the credential). One ADO credential can back many toolkits each pointing at a different project. Old toolkits keep working with their existing project-in-credential value until edited.
+- **Published-agent per-conversation LLM overrides** — for published agents (in Agent Studio published state), users can override `model_name`, `temperature`, etc. via `entity_settings.llm_settings` on the conversation participant without modifying the agent version. Previously this was rejected with `400 "LLM settings override is only allowed for published agents from agent studio"` for non-published agents — that rule still holds for unpublished agents.

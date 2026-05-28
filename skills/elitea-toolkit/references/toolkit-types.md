@@ -85,9 +85,11 @@ Best for: company knowledge bases, indexed docs, semantic search.
 }
 ```
 
-### `application` — Agent-as-tool
+**Scoped index creation (2.0.3+):** indexing workflows can now target a specific folder within a bucket instead of the whole bucket. Pass the folder path in the indexer's input (exact field name varies per indexer — consult the live datasource toolkit spec). Useful when one bucket holds multiple unrelated knowledge bases — index each folder into its own datasource without cross-contamination. Replaces the previous workaround of one-bucket-per-datasource.
 
-Best for: composing agents (one agent calling another).
+### `application` — Agent-as-tool (canonical pattern in ELITEA 2.0.3+)
+
+Best for: composing agents (one agent calling another). As of 2.0.3 sub-agents are first-class **standard tools** — call them exactly like an OpenAPI tool, with an explicit task description rather than implicit chat-history inheritance.
 
 ```json
 {
@@ -101,7 +103,13 @@ Best for: composing agents (one agent calling another).
 }
 ```
 
-Inside a pipeline, the alternative is the `agent` node — see `elitea-pipeline/references/yaml-schema.md`.
+**Explicit task contract (2.0.3+ change):** the parent agent passes the child a `task` field — a self-contained description of what the child should do, including any context the child needs. Previously the child saw the parent's full chat history; now it receives only what the parent explicitly hands over. This is the **important behavior change** to know:
+
+- ✅ Parent agent should construct an explicit `task` string per sub-agent call, e.g. *"Look up KB articles matching the following user query: …"*. Don't assume the child sees prior turns.
+- ✅ Multi-agent pipelines authored before 2.0.3 may behave differently — if the parent implicitly relied on the child seeing previous chat history, the child now sees nothing and produces a weaker response. Audit each sub-agent call and add explicit context to the `task` field.
+- ✅ Inside a pipeline, the alternative is the `agent` node — see `elitea-pipeline/references/yaml-schema.md`. Both routes (toolkit-call and pipeline `agent` node) now use the same task-contract semantics.
+
+Migration check for legacy pipelines: search your YAML for `type: agent` nodes that pass only a short prompt; if the original design assumed the child had multi-turn context, add the relevant history into the prompt explicitly.
 
 ### `custom_python` — In-platform sandbox code
 

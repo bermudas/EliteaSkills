@@ -192,3 +192,23 @@ When explaining concepts:
 | Version name cannot be `"base"` | When creating versions with `postEliteaCoreVersions`, the name `"base"` is reserved. |
 | `meta.step_limit` defaults to 25 | Agent versions default to 25 execution steps. Override via `meta.step_limit`. |
 | `author_id` is auto-set | Fields like `author_id` and `owner_id` are automatically set from the authenticated user — do not pass them manually. |
+
+## Pipeline entry-point triggers (ELITEA 2.0.3+)
+
+Before 2.0.3 every pipeline was driven by a user chatting with it (or an external system calling `POST /predict/...`). 2.0.3 introduced **entry-point triggers** declared at the pipeline level — the pipeline runs automatically when its trigger fires.
+
+| Trigger | When it fires | Allowed in pipeline |
+|---|---|---|
+| `chat` (default) | User sends a message to the pipeline (chat UI, REST, MCP) | All node types — including HITL, Printer, anything that needs user interaction |
+| `scheduled` (cron) | Cron expression matches | **No** HITL nodes, **no** Printer nodes, **no** interrupt-requiring nodes. There is no user to interact with. |
+| `webhook` | External system POSTs to the pipeline's webhook URL | Same constraint as scheduled — no interactive nodes |
+
+**Hard constraint:** if a pipeline contains any HITL, Printer, or interrupt node, only `chat` is a valid trigger. Switching such a pipeline to `scheduled` or `webhook` will fail validation. To use cron/webhook, refactor the interactive parts out (e.g. replace a Printer with a code node that writes to a state variable, or move HITL to a downstream chat-triggered pipeline).
+
+**Implications for nudging / scheduled scans:** the `ConversationHealthAnalyzer` example pipeline has no Printer or HITL nodes, so it's a candidate for native `scheduled` trigger — replacing the GH Actions cron + REST shim in `elitea_support/.github/workflows/nudge-failed-conversations.yaml`. Until the native trigger is verified end-to-end (auth, project scoping, idempotency), the GH-Actions path remains the recommended pattern; see `elitea-testing/references/nudge-case-study.md` § "Scheduling".
+
+**Configuration:** the trigger is set on the pipeline VERSION via the platform UI (Pipeline Studio → entry-point node settings) or via REST (`PUT /api/v2/elitea_core/{project_id}/pipeline/{version_id}/trigger`). Exact body shape varies per trigger type; consult the live OpenAPI spec at `https://next.elitea.ai/api/v2/elitea_core/openapi.json` for the current schema (the release notes don't pin it down).
+
+## Webhook + scheduled triggers vs interactive nodes — failure mode
+
+If you try to switch a pipeline with a Printer/HITL/interrupt node to `scheduled` or `webhook`, the platform will either reject the change at save time OR (worse) accept it but silently skip the interactive step at runtime. Either way the pipeline doesn't behave as designed. Symptom in logs: the trigger fires, the pipeline starts, but execution stops at the interactive node with no error surfaced to any user (because there isn't one). Prevention: validate locally — search your pipeline YAML for `type: printer`, `type: custom` (with HITL flag), and any node with `interrupt: true`; if any are present, keep the trigger at `chat`.
