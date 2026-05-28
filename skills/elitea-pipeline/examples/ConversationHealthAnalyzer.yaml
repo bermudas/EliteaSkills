@@ -38,22 +38,36 @@ nodes:
         PAGE_SIZE = 50
         PARALLEL_DETAIL_FETCH = 30
 
-        # Parse user_input
+        # Parse user_input. The pipeline can be invoked two ways:
+        # 1. Chat / REST: human or external system sends a prompt like
+        #    `"1 day apply project=630"`. We parse it.
+        # 2. Native ELITEA scheduled (cron) trigger: ELITEA fires the pipeline
+        #    with NO user_input — the trigger schema (PipelineTriggerSchedule)
+        #    has no payload field. In that case we use the cron-mode default:
+        #    DAYS_BACK=1, APPLY=True, project=DEFAULT_PROJECT_ID. This makes
+        #    `scheduled` trigger behave the same as `"1 day apply"` from chat,
+        #    which is the cadence the GH-Actions cron has been running on.
         user_input = (elitea_state.get('input', '') or '').strip()
+        is_cron_invocation = (user_input == '')
 
-        # project=NNN override (otherwise DEFAULT_PROJECT_ID)
-        m_proj = re.search(r'project\s*[=: ]\s*(\d+)', user_input, re.IGNORECASE)
-        PROJECT_ID = int(m_proj.group(1)) if m_proj else DEFAULT_PROJECT_ID
+        if is_cron_invocation:
+            PROJECT_ID = DEFAULT_PROJECT_ID
+            DAYS_BACK = 1
+            APPLY = True
+        else:
+            # project=NNN override (otherwise DEFAULT_PROJECT_ID)
+            m_proj = re.search(r'project\s*[=: ]\s*(\d+)', user_input, re.IGNORECASE)
+            PROJECT_ID = int(m_proj.group(1)) if m_proj else DEFAULT_PROJECT_ID
 
-        # Days-back: a bare integer like "1 day" / "30d" / "2"
-        # (must NOT swallow the project= number — strip that first)
-        u_no_proj = re.sub(r'project\s*[=: ]\s*\d+', '', user_input, flags=re.IGNORECASE)
-        m_days = re.search(r'(\d+)\s*(?:day|days|d)?\b', u_no_proj) if u_no_proj else None
-        DAYS_BACK = int(m_days.group(1)) if m_days else DEFAULT_DAYS_BACK
-        DAYS_BACK = max(1, min(DAYS_BACK, 90))
+            # Days-back: a bare integer like "1 day" / "30d" / "2"
+            # (must NOT swallow the project= number — strip that first)
+            u_no_proj = re.sub(r'project\s*[=: ]\s*\d+', '', user_input, flags=re.IGNORECASE)
+            m_days = re.search(r'(\d+)\s*(?:day|days|d)?\b', u_no_proj) if u_no_proj else None
+            DAYS_BACK = int(m_days.group(1)) if m_days else DEFAULT_DAYS_BACK
+            DAYS_BACK = max(1, min(DAYS_BACK, 90))
 
-        # 'apply' keyword switches from DRY-RUN to actually sending nudges.
-        APPLY = bool(re.search(r'\bapply\b', user_input, re.IGNORECASE))
+            # 'apply' keyword switches from DRY-RUN to actually sending nudges.
+            APPLY = bool(re.search(r'\bapply\b', user_input, re.IGNORECASE))
 
         # Filter to Teams-only conversations (those with name starting "Teams:")
         TEAMS_ONLY = True
