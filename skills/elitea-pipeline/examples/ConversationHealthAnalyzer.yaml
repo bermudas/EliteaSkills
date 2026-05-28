@@ -42,13 +42,20 @@ nodes:
         # 1. Chat / REST: human or external system sends a prompt like
         #    `"1 day apply project=630"`. We parse it.
         # 2. Native ELITEA scheduled (cron) trigger: ELITEA fires the pipeline
-        #    with NO user_input — the trigger schema (PipelineTriggerSchedule)
-        #    has no payload field. In that case we use the cron-mode default:
-        #    DAYS_BACK=1, APPLY=True, project=DEFAULT_PROJECT_ID. This makes
-        #    `scheduled` trigger behave the same as `"1 day apply"` from chat,
-        #    which is the cadence the GH-Actions cron has been running on.
+        #    with `user_input="[Scheduled execution triggered]"` (the
+        #    trigger_message constant in elitea_core's
+        #    utils/pipeline_execution.py). The PipelineTriggerSchedule schema
+        #    has no payload field — input can't be customized per trigger.
+        #    In that case we use cron-mode defaults: DAYS_BACK=1, APPLY=True,
+        #    project=DEFAULT_PROJECT_ID. This makes the `scheduled` trigger
+        #    behave the same as `"1 day apply"` from chat, which is the cadence
+        #    the GH-Actions cron used to run on.
         user_input = (elitea_state.get('input', '') or '').strip()
-        is_cron_invocation = (user_input == '')
+        is_cron_invocation = (
+            user_input == ''
+            or '[Scheduled execution triggered]' in user_input
+            or user_input.lower().startswith('[scheduled')
+        )
 
         if is_cron_invocation:
             PROJECT_ID = DEFAULT_PROJECT_ID
@@ -479,6 +486,34 @@ nodes:
                     if last_ts else None
                 )
                 age_str = f'{int(age_min)}m old' if age_min is not None else 'age unknown'
+
+                # Pattern F (highest priority for self-reported failure):
+                # The Teams Support Agent's updated prompt instructs it to emit
+                # `DELIVERY_FAILED:` (in its `<answer>` text) when it has tried
+                # the progressive-simplification ladder (full HTML → bold-only
+                # → plain text → chunked) and ALL attempts came back as
+                # `Tool execution error!`. This is the agent honestly signalling
+                # it gave up — flag immediately, regardless of what tool_output
+                # verdicts say (the agent's last call may actually be a short
+                # "I tried but failed" status that *did* deliver, which would
+                # otherwise hide the failure under `delivered_last_ok`).
+                if 'DELIVERY_FAILED:' in last_text[:600]:
+                    # Extract the agent's self-reported reason if present
+                    import re as _re
+                    m = _re.search(r'DELIVERY_FAILED:\s*([^\n]{1,400})', last_text[:1500])
+                    self_reason = m.group(1).strip() if m else 'agent reported delivery failure'
+                    return {
+                        'status': 'errored',
+                        'failure': 'yes',
+                        'failure_reason': (
+                            f'agent_self_reported_failure: the agent emitted '
+                            f'`DELIVERY_FAILED:` in its <answer> after exhausting '
+                            f'the progressive-simplification ladder. '
+                            f'Agent\'s last words: {self_reason[:200]}'
+                        ),
+                        'last_group_id': last.get('id'),
+                        'evidence': f'first 200 of last_text: {last_text[:200]!r}',
+                    }
 
                 # all_failed and partial: agent attempted but delivery did not
                 # land (or only partially landed). Flag immediately — no grace
