@@ -1468,12 +1468,13 @@ nodes:
     input: []
     output: [report_md]
     structured_output: true
-    transition: Display
-
-  - id: Display
-    type: printer
-    input_mapping:
-      printer:
-        type: variable
-        value: report_md
     transition: END
+
+  # Display (printer) node removed for 2.0.3 native-cron compatibility:
+  # `scheduled` and `webhook` triggers silently refuse to execute pipelines
+  # that contain Printer / HITL / interrupt nodes (the scheduler picks them
+  # up but the runtime stops before the trigger has a chance to fire). The
+  # report is already surfaced via the FetchAndClassify code node's
+  # `output: [report_md]` + `structured_output: true` — ELITEA returns the
+  # state's report_md as the pipeline's response in both chat invocations
+  # and scheduled runs. No printer needed.
