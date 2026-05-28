@@ -1464,9 +1464,23 @@ nodes:
                 for r in deduped if r.get('status') == 'pending'
             ][:10],
         }
-        {'report_md': report_md}
+        # Append the report as a message so ELITEA surfaces it as the
+        # assistant's chat response. Without this, the pipeline returns the
+        # structured output dict but the chat surface shows nothing (we
+        # removed the Printer node for 2.0.3 cron compatibility — see below).
+        # The Knowledge Compaction reference pipeline gets this for free
+        # because its terminal node is `llm`, which auto-appends its response
+        # to `messages`. For pure-code pipelines we have to do it explicitly.
+        #
+        # `langchain_core.messages.AIMessage` is NOT available inside the
+        # Pyodide sandbox the code node runs in. Instead use LangGraph's
+        # 2-tuple message format `(role, content)` which `add_messages`
+        # reducer accepts natively and auto-converts to AIMessage downstream.
+        existing_messages = elitea_state.get('messages', []) or []
+        out_messages = list(existing_messages) + [('ai', report_md)]
+        {'report_md': report_md, 'messages': out_messages}
     input: []
-    output: [report_md]
+    output: [report_md, messages]
     structured_output: true
     transition: END
 
@@ -1474,7 +1488,6 @@ nodes:
   # `scheduled` and `webhook` triggers silently refuse to execute pipelines
   # that contain Printer / HITL / interrupt nodes (the scheduler picks them
   # up but the runtime stops before the trigger has a chance to fire). The
-  # report is already surfaced via the FetchAndClassify code node's
-  # `output: [report_md]` + `structured_output: true` — ELITEA returns the
-  # state's report_md as the pipeline's response in both chat invocations
+  # report is surfaced to chat via the AIMessage we append above —
+  # ELITEA returns the last entry in `messages` as the assistant's reply.
   # and scheduled runs. No printer needed.
